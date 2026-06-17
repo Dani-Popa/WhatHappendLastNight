@@ -12,6 +12,15 @@ struct MatchResult: Identifiable {
     let id = UUID()
     let fileURL: URL
     let faceCount: Int
+    /// Best face-embedding cosine similarity vs. the reference selfie, in 0…1.
+    /// Defaults to 1.0 so older call sites keep working until they pass a value.
+    let similarity: Double
+
+    init(fileURL: URL, faceCount: Int, similarity: Double = 1.0) {
+        self.fileURL = fileURL
+        self.faceCount = faceCount
+        self.similarity = similarity
+    }
 }
 
 private enum FaceMatcherError: LocalizedError {
@@ -315,6 +324,8 @@ class FaceMatcher: ObservableObject {
     @Published var progress: Double = 0.0
     @Published var statusText = "STANDBY"
     @Published var matchedResults: [MatchResult] = []
+    /// True once at least one scan has fully completed (even if no matches were found).
+    @Published var hasScanned = false
 
     private var currentTask: Task<Void, Never>? = nil
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
@@ -347,6 +358,7 @@ class FaceMatcher: ObservableObject {
             self.progress = 0.0
             self.statusText = "STANDBY"
             self.matchedResults.removeAll()
+            self.hasScanned = false
         }
     }
 
@@ -469,10 +481,14 @@ class FaceMatcher: ObservableObject {
                     }
 
                     if bestSimilarity >= minimumSimilarity {
-                        localMatches.append(MatchResult(fileURL: fileURL, faceCount: totalPeopleInPhoto))
+                        localMatches.append(MatchResult(
+                            fileURL: fileURL,
+                            faceCount: totalPeopleInPhoto,
+                            similarity: Double(max(0, min(1, bestSimilarity)))
+                        ))
 
                         await MainActor.run {
-                            self.matchedResults = localMatches
+                            self.matchedResults = localMatches.sorted { $0.similarity > $1.similarity }
                         }
                     }
                 } catch {
@@ -484,6 +500,7 @@ class FaceMatcher: ObservableObject {
 
             await MainActor.run {
                 self.isScanning = false
+                self.hasScanned = true
                 self.statusText = localMatches.isEmpty ? "FACENET SCAN FINISHED: NO LOCAL RESULTS" : "FACENET SCAN COMPLETE: \(localMatches.count) TARGETS FOUND"
             }
         }

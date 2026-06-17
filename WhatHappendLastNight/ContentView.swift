@@ -4,10 +4,20 @@ import AppKit
 import UniformTypeIdentifiers
 import AVFoundation
 
+// MARK: - Root view
+//
+// Implements the design system from DESIGN_GUIDE.md:
+// — Calm, trust-signaling palette (navy + teal) with full light/dark parity.
+// — System fonts (SF Pro) at the type scale defined in §2.
+// — One primary CTA per screen; persistent identity strip; offline glyph in title.
+// — Two-panel comparison and a results grid that uses the ScoreChip (color + dots + word).
+
 struct ContentView: View {
     @StateObject private var matcher = FaceMatcher()
-    
-    // State variables
+    @EnvironmentObject var theme: ThemeManager
+
+    // ---- State -------------------------------------------------------------
+
     @State private var targetSelfie: NSImage? = nil
     @State private var targetSelfieURL: URL? = nil
     @State private var sourceFolderURL: URL? = nil
@@ -17,400 +27,41 @@ struct ContentView: View {
     @State private var isShowingCameraSheet = false
     @State private var isShowingPrivacyNotice = false
     @State private var hasAcceptedBiometricNotice = false
-    
-    // Aesthetic Palette constants (Gold & Charcoal Core)
-    private let darkBackground = Color(NSColor(red: 0.02, green: 0.02, blue: 0.02, alpha: 1.0))
-    private let richCard = Color(NSColor(red: 0.04, green: 0.04, blue: 0.04, alpha: 1.0))
-    private let deepSlate = Color(NSColor(red: 0.06, green: 0.06, blue: 0.06, alpha: 1.0))
-    private let goldAccent = Color(NSColor(red: 0.83, green: 0.69, blue: 0.22, alpha: 1.0)) // #D4AF37
-    private let textMuted = Color(NSColor(red: 0.40, green: 0.40, blue: 0.40, alpha: 1.0))
-    private let textLight = Color(NSColor(red: 0.88, green: 0.85, blue: 0.82, alpha: 1.0))
-    
+    @State private var selectedResultID: MatchResult.ID? = nil
+    @State private var lightboxIndex: Int? = nil
+
+    // ---- Layout ------------------------------------------------------------
+
     var body: some View {
-        VStack(spacing: 0) {
-            // MARK: Professional Header
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("What Happened Last Night")
-                        .font(.custom("Georgia", size: 24))
-                        .italic()
-                        .foregroundColor(textLight)
-                    
-                    Text("LOCAL FACENET MATCHING / OFFLINE CORE V2")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundColor(textMuted)
-                        .kerning(1.5)
+        ZStack {
+            VStack(spacing: 0) {
+                header
+                Divider().background(Tokens.border)
+
+                HSplitView {
+                    setupPanel
+                    resultsPanel
                 }
-                
-                Spacer()
-                
-                // Connection indicator
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(Color.emerald)
-                        .frame(width: 6, height: 6)
-                    Text("OFFLINE LOCAL MODE")
-                        .font(.system(size: 9, design: .monospaced))
-                        .fontWeight(.bold)
-                        .foregroundColor(textMuted)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color.black)
-                .cornerRadius(4)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 4)
-                        .stroke(Color(white: 0.12), lineWidth: 1)
+
+                Divider().background(Tokens.border)
+                footer
+            }
+            .frame(minWidth: 980, minHeight: 680)
+            .background(Tokens.bg)
+            .foregroundColor(Tokens.textPrimary)
+
+            // Full-window lightbox — sits above every panel
+            if lightboxIndex != nil {
+                LightboxView(
+                    results: matcher.matchedResults,
+                    currentIndex: $lightboxIndex
                 )
+                .transition(.opacity.animation(.easeInOut(duration: 0.2)))
+                .zIndex(100)
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 16)
-            .background(darkBackground)
-            
-            Divider().background(Color(white: 0.1))
-            
-            // MARK: Primary Split Screen
-            HSplitView {
-                // MARK: LEFT SIDE: SETUP PANELS
-                VStack(spacing: 16) {
-                    // Segment 1: Biometric Target Identity Selection
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "faceid")
-                                .foregroundColor(goldAccent)
-                            Text("1. Target Identity")
-                                .font(.system(size: 10, design: .monospaced))
-                                .fontWeight(.bold)
-                                .foregroundColor(textMuted)
-                        }
-                        
-                        // Drag-and-drop identity zone (opens native Camera Capture tool)
-                        Button(action: { isShowingCameraSheet = true }) {
-                            VStack(spacing: 12) {
-                                if let targetSelfie = targetSelfie {
-                                    Image(nsImage: targetSelfie)
-                                        .resizable()
-                                        .scaledToFit()
-                                        .frame(maxHeight: 140)
-                                        .cornerRadius(8)
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 8)
-                                                .stroke(goldAccent.opacity(0.4), lineWidth: 1)
-                                        )
-                                        .shadow(radius: 6)
-                                    
-                                    Text(targetSelfieURL?.lastPathComponent ?? "Facetime HD Snapshot Captured")
-                                        .font(.system(size: 9, design: .monospaced))
-                                        .foregroundColor(goldAccent)
-                                        .truncationMode(.middle)
-                                        .lineLimit(1)
-                                } else {
-                                    Image(systemName: "camera")
-                                        .font(.system(size: 24))
-                                        .foregroundColor(textMuted)
-                                    
-                                    Text("CLICK TO CAPTURE WITH MAC CAMERA")
-                                        .font(.system(size: 10, weight: .bold))
-                                        .foregroundColor(textLight.opacity(0.70))
-                                    
-                                    Text("Selfie stays on this device until cleared")
-                                        .font(.system(size: 8))
-                                        .foregroundColor(textMuted)
-                                }
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 20)
-                            .background(targetSelfie == nil ? richCard : Color.black.opacity(0.4))
-                            .cornerRadius(12)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .stroke(isSelfieHovered ? goldAccent.opacity(0.6) : Color(white: 0.12), style: StrokeStyle(lineWidth: 1, dash: targetSelfie == nil ? [4] : []))
-                            )
-                        }
-                        .buttonStyle(PlainButtonStyle())
-                        .onHover { h in isSelfieHovered = h }
-                        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-                            loadSelfieFromDrop(providers)
-                        }
-                    }
-                    .padding(16)
-                    .background(richCard)
-                    .cornerRadius(16)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16)
-                            .stroke(Color(white: 0.08), lineWidth: 1)
-                    )
-                    
-                    // Segment 2: Source Folders
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "folder")
-                                .foregroundColor(goldAccent)
-                            Text("2. Repository Media Folder")
-                                .font(.system(size: 10, design: .monospaced))
-                                .fontWeight(.bold)
-                                .foregroundColor(textMuted)
-                        }
-                        
-                        Button(action: selectSourceFolder) {
-                            VStack(spacing: 12) {
-                                Image(systemName: "folder.badge.gearshape")
-                                    .font(.system(size: 24))
-                                    .foregroundColor(sourceFolderURL == nil ? textMuted : goldAccent)
-                                
-                                Text(sourceFolderURL == nil ? "CHOOSE PORTABLE SOURCE FOLDER" : "FOLDER MOUNTED")
-                                    .font(.system(size: 10, weight: .bold))
-                                    .foregroundColor(textLight.opacity(0.70))
-                                
-                                Text(sourceFolderURL?.path ?? "Reads only image files from a folder you select")
-                                    .font(.system(size: 8, design: .monospaced))
-                                    .foregroundColor(textMuted)
-                                    .lineLimit(2)
-                                    .multilineTextAlignment(.center)
-                                    .padding(.horizontal, 8)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 20)
-                            .background(sourceFolderURL == nil ? richCard : Color.black.opacity(0.4))
-                            .cornerRadius(12)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .stroke(isFolderHovered ? goldAccent.opacity(0.6) : Color(white: 0.12), style: StrokeStyle(lineWidth: 1, dash: [4]))
-                            )
-                        }
-                        .buttonStyle(PlainButtonStyle())
-                        .onHover { h in isFolderHovered = h }
-                        .onDrop(of: [.directory], isTargeted: nil) { providers in
-                            loadFolderFromDrop(providers)
-                        }
-                    }
-                    .padding(16)
-                    .background(richCard)
-                    .cornerRadius(16)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16)
-                            .stroke(Color(white: 0.08), lineWidth: 1)
-                    )
-                    
-                    // Matcher Strictness Settings
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("FACENET STRICTNESS / STRICTEȚE")
-                                .font(.system(size: 9, design: .monospaced))
-                                .fontWeight(.bold)
-                                .foregroundColor(textMuted)
-                            Spacer()
-                            Text("\(Int(threshold * 100))%")
-                                .font(.system(size: 9, design: .monospaced))
-                                .foregroundColor(goldAccent)
-                        }
-                        
-                        Slider(value: $threshold, in: 0.0...1.0)
-                            .accentColor(goldAccent)
-                        
-                        HStack {
-                            Text("Lenient (Mai multe rezultate)")
-                                .font(.system(size: 8))
-                                .foregroundColor(textMuted)
-                            Spacer()
-                            Text("Strict (Mai puține false positives)")
-                                .font(.system(size: 8))
-                                .foregroundColor(textMuted)
-                        }
-                    }
-                    .padding(12)
-                    .background(richCard.opacity(0.6))
-                    .cornerRadius(8)
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "lock.shield")
-                                .foregroundColor(goldAccent)
-                            Text("Privacy & Consent")
-                                .font(.system(size: 10, design: .monospaced))
-                                .fontWeight(.bold)
-                                .foregroundColor(textMuted)
-                        }
-
-                        Text("Face matching runs locally. Selfies, face embeddings, and selected photos are not written to disk by this app and are not sent over the network.")
-                            .font(.system(size: 9))
-                            .foregroundColor(textMuted)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                        Toggle(isOn: $hasAcceptedBiometricNotice) {
-                            Text("I consent to local face matching for this session")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundColor(textLight.opacity(0.85))
-                        }
-                        .toggleStyle(.checkbox)
-
-                        HStack(spacing: 8) {
-                            Button(action: { isShowingPrivacyNotice = true }) {
-                                Text("PRIVACY SUMMARY")
-                                    .font(.system(size: 9, design: .monospaced))
-                                    .fontWeight(.bold)
-                                    .foregroundColor(goldAccent)
-                            }
-                            .buttonStyle(PlainButtonStyle())
-
-                            Spacer()
-
-                            Button(action: clearLocalData) {
-                                Text("CLEAR SESSION")
-                                    .font(.system(size: 9, design: .monospaced))
-                                    .fontWeight(.bold)
-                                    .foregroundColor(.red)
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                        }
-                    }
-                    .padding(12)
-                    .background(richCard.opacity(0.6))
-                    .cornerRadius(8)
-                    
-                    Spacer()
-                    
-                    // Segment 3: Biometric detection control trigger
-                    VStack(spacing: 12) {
-                        if matcher.isScanning {
-                            VStack(spacing: 6) {
-                                ProgressView(value: matcher.progress, total: 1.0)
-                                    .progressViewStyle(LinearProgressViewStyle())
-                                    .accentColor(goldAccent)
-                                
-                                HStack {
-                                    Text(matcher.statusText)
-                                        .font(.system(size: 9, design: .monospaced))
-                                        .foregroundColor(goldAccent)
-                                    Spacer()
-                                    Text("\(Int(matcher.progress * 100))%")
-                                        .font(.system(size: 9, design: .monospaced))
-                                        .foregroundColor(textLight)
-                                }
-                            }
-                            
-                            Button(action: { matcher.cancel() }) {
-                                Text("CANCEL DEEP SCAN")
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .fontWeight(.bold)
-                                    .foregroundColor(.red)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 10)
-                                    .background(Color.red.opacity(0.1))
-                                    .cornerRadius(8)
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                        } else {
-                            Button(action: runSelfieScan) {
-                                HStack {
-                                    Image(systemName: "sparkles")
-                                    Text("TRIGGER MATCHING SCANNER")
-                                        .font(.system(size: 10, design: .monospaced))
-                                        .fontWeight(.bold)
-                                }
-                                .foregroundColor(targetSelfie == nil || sourceFolderURL == nil || !hasAcceptedBiometricNotice ? textMuted : Color.black)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 12)
-                                .background(targetSelfie == nil || sourceFolderURL == nil || !hasAcceptedBiometricNotice ? deepSlate : goldAccent)
-                                .cornerRadius(8)
-                                .shadow(color: targetSelfie != nil && sourceFolderURL != nil && hasAcceptedBiometricNotice ? goldAccent.opacity(0.15) : Color.clear, radius: 8)
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                            .disabled(targetSelfie == nil || sourceFolderURL == nil || !hasAcceptedBiometricNotice)
-                        }
-                    }
-                    .padding(16)
-                    .background(richCard)
-                    .cornerRadius(16)
-                }
-                .frame(width: 310)
-                .padding(16)
-                .background(darkBackground)
-                
-                // MARK: RIGHT SIDE: RESULT SNAPSHOT CONTAINER
-                VStack(spacing: 0) {
-                    // Title info drawer
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("LOCAL MATCH RESULTS")
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundColor(textLight)
-                            
-                            Text(matcher.matchedResults.isEmpty ? "OFFLINE PHOTO GRID STANDBY" : "POTENTIAL LOCAL MATCHES: \(matcher.matchedResults.count) FRAMES")
-                                .font(.system(size: 9, design: .monospaced))
-                                .foregroundColor(textMuted)
-                        }
-                        Spacer()
-                    }
-                    .padding(20)
-                    .background(richCard)
-                    
-                    Divider().background(Color(white: 0.1))
-                    
-                    if matcher.matchedResults.isEmpty {
-                        // Empty Standby view
-                        VStack(spacing: 16) {
-                            Image(systemName: "doc.text.magnifyingglass")
-                                .font(.system(size: 52))
-                                .foregroundColor(textMuted.opacity(0.4))
-                            
-                            Text("No local matches found yet")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundColor(textLight.opacity(0.6))
-                            
-                            Text("Provide a target selfie, choose a folder, and confirm consent to run local-only matching.")
-                                .font(.system(size: 10))
-                                .foregroundColor(textMuted)
-                                .multilineTextAlignment(.center)
-                                .frame(maxWidth: 340)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(darkBackground)
-                    } else {
-                        // Matched photos grid
-                        ScrollView {
-                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 220), spacing: 16)], spacing: 16) {
-                                ForEach(matcher.matchedResults) { result in
-                                    ResultCardView(result: result, accent: goldAccent, muted: textMuted, light: textLight, cardBg: richCard)
-                                }
-                            }
-                            .padding(20)
-                        }
-                        .background(darkBackground)
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(darkBackground)
-            }
-            
-            Divider().background(Color(white: 0.1))
-            
-            // MARK: Static elegant footer branding
-            HStack {
-                Text("© 2026 What Happened Last Night. LOCAL PRIVACY MODE ACTIVE.")
-                    .font(.system(size: 8, design: .monospaced))
-                    .foregroundColor(textMuted)
-                
-                Spacer()
-                
-                HStack(spacing: 12) {
-                    Text("COREML FACENET EMBEDDING PIPELINE")
-                        .font(.system(size: 8, design: .monospaced))
-                        .foregroundColor(textMuted)
-                    Circle()
-                        .fill(goldAccent.opacity(0.5))
-                        .frame(width: 4, height: 4)
-                    Text("NO NETWORK UPLOADS")
-                        .font(.system(size: 8, design: .monospaced))
-                        .foregroundColor(textMuted)
-                }
-            }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 12)
-            .background(darkBackground)
         }
-        .frame(minWidth: 950, minHeight: 650)
-        .background(darkBackground)
+        .preferredColorScheme(theme.preference.colorScheme)
+        .animation(.easeInOut(duration: 0.20), value: theme.preference)
         .sheet(isPresented: $isShowingCameraSheet) {
             CameraCaptureSheet(isPresented: $isShowingCameraSheet) { capturedImage in
                 self.targetSelfie = capturedImage
@@ -420,55 +71,214 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $isShowingPrivacyNotice) {
-            PrivacyNoticeSheet(isPresented: $isShowingPrivacyNotice, hasAcceptedBiometricNotice: $hasAcceptedBiometricNotice)
+            PrivacyNoticeSheet(
+                isPresented: $isShowingPrivacyNotice,
+                hasAcceptedBiometricNotice: $hasAcceptedBiometricNotice
+            )
         }
     }
-    
+
+    // MARK: Header — title + persistent identity strip + offline glyph
+
+    private var header: some View {
+        HStack(spacing: Space.m) {
+            Text("What Happened Last Night")
+                .font(Typography.h2)
+                .foregroundColor(Tokens.textPrimary)
+
+            OfflineBadge()
+
+            Spacer()
+
+            // Reference identity + an inline "Clear session" sit on the far
+            // right so the user can discard the session without scrolling.
+            if let selfie = targetSelfie {
+                IdentityStrip(image: selfie, label: targetSelfieURL?.lastPathComponent ?? "Selfie captured")
+
+                Button(action: clearLocalData) {
+                    HStack(spacing: Space.xs) {
+                        Image(systemName: "trash")
+                        Text("CLEAR SESSION")
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .tracking(0.6)
+                    }
+                    .foregroundColor(Tokens.textSecondary)
+                    .padding(.horizontal, Space.s + 2)
+                    .padding(.vertical, 6)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Radius.s)
+                            .stroke(Tokens.border, lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("Discard the selfie, folder, and any in-memory matches")
+            }
+
+            ThemeToggleButton()
+            HeaderIconButton(
+                systemName: "questionmark.circle",
+                help: "Privacy details"
+            ) { isShowingPrivacyNotice = true }
+        }
+        .padding(.horizontal, Space.xl)
+        .padding(.vertical, Space.m)
+        .background(Tokens.bg)
+    }
+
+    // MARK: Left — setup panel (selfie · folder · threshold · run)
+    //
+    // Designed to fit at ~680pt window height without scrolling. Privacy lives
+    // *next to the action button*, not at the top — the user can pick the
+    // selfie and folder in any order, and consent is asked only once, right
+    // before scanning. If they hit Find Me without consenting, the full
+    // PrivacyNoticeSheet auto-opens (see runSelfieScan).
+
+    private var setupPanel: some View {
+        VStack(spacing: 0) {
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: Space.m) {
+
+                    StageCard(icon: "faceid", eyebrow: "1. Target identity") {
+                        SelfieDropzone(
+                            image: targetSelfie,
+                            filename: targetSelfieURL?.lastPathComponent,
+                            bestMatch: matcher.matchedResults.first?.similarity,
+                            isHovered: $isSelfieHovered,
+                            onCapture: { isShowingCameraSheet = true },
+                            onDrop: loadSelfieFromDrop
+                        )
+                    }
+
+                    StageCard(icon: "folder", eyebrow: "2. Photo folder") {
+                        FolderDropzone(
+                            folderURL: sourceFolderURL,
+                            isHovered: $isFolderHovered,
+                            onChoose: selectSourceFolder,
+                            onDrop: loadFolderFromDrop
+                        )
+                    }
+
+                    ThresholdCard(threshold: $threshold)
+
+                    // Privacy consent card scrolls with the content so it
+                    // stays close to the setup steps it relates to.
+                    if !matcher.isScanning {
+                        ConsentCard(
+                            consented: $hasAcceptedBiometricNotice,
+                            onDetails: { isShowingPrivacyNotice = true }
+                        )
+                    }
+                }
+                .padding(Space.l)
+                .frame(maxWidth: .infinity) // Constrain width so ScrollView doesn't bleed
+            }
+
+            // Only the action button (and scan progress) is pinned so it is
+            // always reachable without scrolling.
+            FindMeButton(
+                matcher: matcher,
+                consented: $hasAcceptedBiometricNotice,
+                hasSelfie: targetSelfie != nil,
+                hasFolder: sourceFolderURL != nil,
+                onRun: runSelfieScan
+            )
+            .padding(.horizontal, Space.l)
+            .padding(.bottom, Space.l)
+            .padding(.top, Space.s)
+            .background(Tokens.surfaceSunken)
+        }
+        .frame(width: 340)
+        .background(Tokens.surfaceSunken)
+    }
+
+    // MARK: Right — results
+
+    private var resultsPanel: some View {
+        VStack(spacing: 0) {
+            ResultsHeader(count: matcher.matchedResults.count)
+            if matcher.isScanning && matcher.matchedResults.isEmpty {
+                ScanningPlaceholder(progress: matcher.progress, status: matcher.statusText)
+            } else if matcher.hasScanned && matcher.matchedResults.isEmpty {
+                NoMatchesState()
+            } else if matcher.matchedResults.isEmpty {
+                ResultsEmptyState(
+                    hasSelfie: targetSelfie != nil,
+                    hasFolder: sourceFolderURL != nil,
+                    hasConsent: hasAcceptedBiometricNotice
+                )
+            } else {
+                ResultsGrid(
+                    results: matcher.matchedResults,
+                    selectedID: $selectedResultID,
+                    lightboxIndex: $lightboxIndex
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Tokens.bg)
+    }
+
+    // MARK: Footer
+
+    private var footer: some View {
+        HStack(spacing: Space.l) {
+            HStack(spacing: Space.xs + 2) {
+                Circle()
+                    .fill(Tokens.accentSecondary)
+                    .frame(width: 5, height: 5)
+                Text("ON-DEVICE ONLY · NO NETWORK")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .tracking(0.6)
+                    .foregroundColor(Tokens.accentSecondary)
+            }
+            Text("Embeddings discarded on Clear")
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundColor(Tokens.textTertiary)
+            Spacer()
+            Text("VISION + COREML FACENET")
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .tracking(0.5)
+                .foregroundColor(Tokens.textTertiary)
+        }
+        .padding(.horizontal, Space.xl)
+        .padding(.vertical, Space.s + 2)
+        .background(Tokens.bg)
+    }
+
     // MARK: Actions
-    
-    /// Present native macOS File Picker to pick selfie
+
     private func selectSelfieFile() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        
-        if panel.runModal() == .OK {
-            if let url = panel.url, let image = NSImage(contentsOf: url) {
-                self.targetSelfie = image
-                self.targetSelfieURL = url
-            }
+        if panel.runModal() == .OK, let url = panel.url, let image = NSImage(contentsOf: url) {
+            targetSelfie = image
+            targetSelfieURL = url
         }
     }
-    
-    /// Native folder picker panel
+
     private func selectSourceFolder() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        
-        if panel.runModal() == .OK {
-            if let url = panel.url {
-                self.sourceFolderURL = url
-            }
+        if panel.runModal() == .OK, let url = panel.url {
+            sourceFolderURL = url
         }
     }
-    
-    private func runSelfieScan() {
-            guard hasAcceptedBiometricNotice else {
-                isShowingPrivacyNotice = true
-                return
-            }
 
-            guard let selfie = self.targetSelfie,
-                  let folder = self.sourceFolderURL else { return }
-            
-            Task {
-                await matcher.scanPartyFolder(selfieImage: selfie, folderURL: folder, strictness: threshold)
-            }
+    private func runSelfieScan() {
+        guard hasAcceptedBiometricNotice else {
+            isShowingPrivacyNotice = true
+            return
         }
+        guard let selfie = targetSelfie, let folder = sourceFolderURL else { return }
+        Task {
+            await matcher.scanPartyFolder(selfieImage: selfie, folderURL: folder, strictness: threshold)
+        }
+    }
 
     private func clearLocalData() {
         matcher.cancel()
@@ -477,16 +287,14 @@ struct ContentView: View {
         targetSelfieURL = nil
         sourceFolderURL = nil
         hasAcceptedBiometricNotice = false
+        selectedResultID = nil
     }
-    
-    // MARK: Drag and drop loaders
-    
+
     private func loadSelfieFromDrop(_ providers: [NSItemProvider]) -> Bool {
         guard let provider = providers.first else { return false }
-        
-        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
-            guard let data = item as? Data, let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
-            
+        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+            guard let data = item as? Data,
+                  let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
             DispatchQueue.main.async {
                 if let image = NSImage(contentsOf: url) {
                     self.targetSelfie = image
@@ -496,187 +304,1227 @@ struct ContentView: View {
         }
         return true
     }
-    
+
     private func loadFolderFromDrop(_ providers: [NSItemProvider]) -> Bool {
         guard let provider = providers.first else { return false }
-        
-        provider.loadItem(forTypeIdentifier: UTType.directory.identifier, options: nil) { item, error in
-            guard let data = item as? Data, let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
-            
-            DispatchQueue.main.async {
-                self.sourceFolderURL = url
-            }
+        provider.loadItem(forTypeIdentifier: UTType.directory.identifier, options: nil) { item, _ in
+            guard let data = item as? Data,
+                  let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
+            DispatchQueue.main.async { self.sourceFolderURL = url }
         }
         return true
     }
 }
 
-// MARK: Individual matching thumbnail card rendering
-struct ResultCardView: View {
-    let result: MatchResult
-    let accent: Color
-    let muted: Color
-    let light: Color
-    let cardBg: Color
-    
-    @State private var thumbnail: NSImage? = nil
-    @State private var isHovered = false
-    
+// MARK: - Reusable card chrome
+
+/// Production card — bordered surface with an eyebrow header row + content.
+/// The card owns the chrome (padding, background, border, radius), so child
+/// dropzones can focus purely on their interactive content. Matches the
+/// original v1 layout where each setup step sat in its own polished panel.
+private struct StageCard<Content: View>: View {
+    let icon: String
+    let eyebrow: String
+    @ViewBuilder let content: Content
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Thumbnail container
-            ZStack(alignment: .topTrailing) {
-                if let thumbnail = thumbnail {
-                    Image(nsImage: thumbnail)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(height: 154)
-                        .clipped()
-                } else {
-                    Rectangle()
-                        .fill(cardBg)
-                        .frame(height: 154)
-                        .overlay(
-                            ProgressView()
-                                .scaleEffect(0.6)
-                        )
-                }
-                
-                // Spot identification ribbon
-                Text("SPOTTED")
-                    .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundColor(.emerald)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(Color.black.opacity(0.85))
-                    .cornerRadius(4)
-                    .padding(8)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .stroke(Color.emerald.opacity(0.3), lineWidth: 1)
-                            .padding(8)
-                    )
+        VStack(alignment: .leading, spacing: Space.m) {
+            HStack(spacing: Space.xs + 2) {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Tokens.accentPrimary)
+                Text(eyebrow.uppercased())
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(0.6)
+                    .foregroundColor(Tokens.textSecondary)
             }
-            .frame(height: 154)
-            .background(Color.black)
-            .overlay(
-                // Interactive hover zoom action overlay
-                Group {
-                    if isHovered {
-                        Color.black.opacity(0.4)
-                        Button(action: revealInFinder) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "magnifyingglass")
-                                Text("REVEAL FILE")
-                            }
-                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                            .foregroundColor(.black)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(accent)
-                            .cornerRadius(4)
-                        }
-                        .buttonStyle(PlainButtonStyle())
-                    }
-                }
-            )
-            
-            // Description drawer
-            VStack(alignment: .leading, spacing: 6) {
-                Text(result.fileURL.lastPathComponent)
-                    .font(.system(size: 9, design: .monospaced))
-                    .fontWeight(.bold)
-                    .foregroundColor(light)
-                    .lineLimit(1)
-                
-                HStack {
-                    Text("Faces found: \(result.faceCount)")
-                        .font(.system(size: 8))
-                        .foregroundColor(muted)
-                    
-                    Spacer()
-                    
-                    Button(action: revealInFinder) {
-                        Image(systemName: "arrow.right.circle")
-                            .font(.system(size: 11))
-                            .foregroundColor(accent)
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .help("Show on disk in macOS Finder")
-                }
-            }
-            .padding(10)
-            .background(cardBg)
+            content
         }
-        .cornerRadius(10)
+        .padding(Space.l - 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Tokens.surface)
+        .clipShape(RoundedRectangle(cornerRadius: Radius.l))
         .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(isHovered ? accent.opacity(0.35) : Color(white: 0.12), lineWidth: 1)
+            RoundedRectangle(cornerRadius: Radius.l)
+                .stroke(Tokens.border, lineWidth: 1)
         )
-        .shadow(radius: isHovered ? 8 : 2)
-        .onHover { h in isHovered = h }
-        .onAppear {
-            loadThumbnailAsync()
+    }
+}
+
+// MARK: - Header subviews
+
+/// Brand block — square accent icon + product name + subtitle.
+/// Sits at the top of the setup column, matches the visual rhythm of the
+/// reference design (large solid-colored tile + two-line wordmark).
+private struct BrandBlock: View {
+    var body: some View {
+        HStack(spacing: Space.s + 2) {
+            ZStack {
+                RoundedRectangle(cornerRadius: Radius.s + 2)
+                    .fill(Tokens.accentPrimary)
+                    .frame(width: 38, height: 38)
+                Image(systemName: "face.smiling.inverse")
+                    .font(.system(size: 22, weight: .regular))
+                    .foregroundColor(Tokens.onAccent)
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Vault Identity")
+                    .font(Typography.h3)
+                    .foregroundColor(Tokens.accentPrimary)
+                Text("Local face matching")
+                    .font(Typography.caption)
+                    .foregroundColor(Tokens.textSecondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Space.xs)
+        .padding(.bottom, Space.xs)
+    }
+}
+
+/// Compact circular icon button used in the header (theme toggle, help).
+private struct HeaderIconButton: View {
+    let systemName: String
+    let help: String
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Tokens.textSecondary)
+                .frame(width: 28, height: 28)
+                .background(isHovered ? Tokens.surfaceElevated : Color.clear)
+                .clipShape(Circle())
+                .overlay(Circle().stroke(Tokens.border, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help(help)
+    }
+}
+
+/// Single-button appearance picker visible in the header.
+/// Click cycles System → Light → Dark → System; the icon and tooltip update
+/// to reflect the current preference. The full View → Appearance menu still
+/// works for keyboard users (⌘⌥0/1/2).
+private struct ThemeToggleButton: View {
+    @EnvironmentObject var theme: ThemeManager
+    @State private var isHovered = false
+
+    private var next: AppearancePreference {
+        switch theme.preference {
+        case .system: return .light
+        case .light:  return .dark
+        case .dark:   return .system
         }
     }
-    
-    /// Generate quick preview asynchronously so UI loads immediately
-    private func loadThumbnailAsync() {
-        DispatchQueue.global(qos: .userInitiated).async {
-            // Load custom local image and cache aspect ratios
-            if let image = NSImage(contentsOf: result.fileURL) {
-                // Resize for local presentation performance
-                let targetSize = NSSize(width: 300, height: 260)
-                let resized = image.resized(to: targetSize)
-                DispatchQueue.main.async {
-                    self.thumbnail = resized
+
+    var body: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                theme.preference = next
+            }
+        } label: {
+            Image(systemName: theme.preference.sfSymbol)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(Tokens.textSecondary)
+                .frame(width: 28, height: 28)
+                .background(isHovered ? Tokens.surfaceElevated : Color.clear)
+                .clipShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help("Appearance: \(theme.preference.label) — click for \(next.label)")
+        .accessibilityLabel("Appearance: \(theme.preference.label)")
+        .accessibilityHint("Switches to \(next.label)")
+    }
+}
+
+private struct OfflineBadge: View {
+    var body: some View {
+        HStack(spacing: Space.xs + 2) {
+            Image(systemName: "shield.lefthalf.filled")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(Tokens.accentSecondary)
+            Text("OFFLINE MODE")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .tracking(0.7)
+                .foregroundColor(Tokens.accentSecondary)
+        }
+        .padding(.horizontal, Space.m)
+        .padding(.vertical, 5)
+        .background(Tokens.scoreHighBg)
+        .clipShape(Capsule())
+        .overlay(
+            Capsule().stroke(Tokens.accentSecondary.opacity(0.35), lineWidth: 1)
+        )
+        .help("Network access is disabled for this app. Zero outbound requests this session.")
+        .accessibilityLabel("Offline mode. Network access is disabled.")
+    }
+}
+
+private struct IdentityStrip: View {
+    let image: NSImage
+    let label: String
+
+    var body: some View {
+        HStack(spacing: Space.s) {
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 30, height: 30)
+                .clipShape(RoundedRectangle(cornerRadius: Radius.s - 2))
+            VStack(alignment: .leading, spacing: 1) {
+                Text("REFERENCE")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .tracking(0.5)
+                    .foregroundColor(Tokens.textTertiary)
+                Text(label)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundColor(Tokens.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 180, alignment: .leading)
+            }
+        }
+        .padding(.horizontal, Space.s + 2)
+        .padding(.vertical, 5)
+        .background(Tokens.surface)
+        .clipShape(RoundedRectangle(cornerRadius: Radius.m))
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.m)
+                .stroke(Tokens.border, lineWidth: 1)
+        )
+    }
+}
+
+// MARK: - Dropzones
+
+private struct SelfieDropzone: View {
+    let image: NSImage?
+    let filename: String?
+    /// Best similarity from the most recent scan, if any. Shown as a green
+    /// caption under the thumbnail — matches the "76%" label in the design.
+    var bestMatch: Double? = nil
+    @Binding var isHovered: Bool
+    let onCapture: () -> Void
+    let onDrop: ([NSItemProvider]) -> Bool
+
+    /// Fixed preview size so the dropzone keeps an identical footprint whether
+    /// it is empty or holding a selfie — the box never resizes around the photo.
+    private let boxHeight: CGFloat = 200
+
+    var body: some View {
+        VStack(spacing: Space.s) {
+            Button(action: onCapture) {
+                Group {
+                    if let image = image {
+                        ZStack {
+                            // Subtle tinted background fills any letterbox gaps
+                            RoundedRectangle(cornerRadius: Radius.m)
+                                .fill(Tokens.surfaceSunken)
+                            Image(nsImage: image)
+                                .resizable()
+                                .scaledToFit()
+                                .clipShape(RoundedRectangle(cornerRadius: Radius.m - 2))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: boxHeight)
+                        .clipShape(RoundedRectangle(cornerRadius: Radius.m))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: Radius.m)
+                                .stroke(
+                                    isHovered ? Tokens.accentPrimary : Tokens.border,
+                                    lineWidth: isHovered ? 1.5 : 1
+                                )
+                        )
+                    } else {
+                        VStack(spacing: Space.s) {
+                            Image(systemName: "camera.badge.ellipsis")
+                                .font(.system(size: 28, weight: .light))
+                                .foregroundColor(isHovered ? Tokens.accentPrimary : Tokens.textTertiary)
+                            Text("UPLOAD IMAGE")
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .tracking(0.8)
+                                .foregroundColor(Tokens.textSecondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: boxHeight)
+                        .background(Tokens.surfaceSunken.opacity(0.5))
+                        .clipShape(RoundedRectangle(cornerRadius: Radius.m))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: Radius.m)
+                                .stroke(
+                                    isHovered ? Tokens.accentPrimary : Tokens.borderStrong.opacity(0.55),
+                                    style: StrokeStyle(lineWidth: isHovered ? 1.5 : 1, dash: [5, 4])
+                                )
+                        )
+                    }
                 }
+            }
+            .buttonStyle(.plain)
+            .onHover { isHovered = $0 }
+            .onDrop(of: [.fileURL], isTargeted: nil, perform: onDrop)
+            .help("Click to capture, or drag an image here")
+            .animation(.easeOut(duration: 0.15), value: isHovered)
+
+            // Caption row sits OUTSIDE the dropzone, in the parent card chrome.
+            if let bestMatch = bestMatch {
+                Text("\(Int((bestMatch * 100).rounded()))%")
+                    .font(Typography.scoreNumeral)
+                    .foregroundColor(Tokens.accentSecondary)
+            } else if image != nil {
+                Text(filename ?? "identity_preview.png")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundColor(Tokens.accentPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } else {
+                Text("No image selected")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(Tokens.textTertiary)
             }
         }
     }
-    
-    /// Trigger local macOS spatial file locator spotlight
+}
+
+private struct FolderDropzone: View {
+    let folderURL: URL?
+    @Binding var isHovered: Bool
+    let onChoose: () -> Void
+    let onDrop: ([NSItemProvider]) -> Bool
+
+    var body: some View {
+        Button(action: onChoose) {
+            HStack(spacing: Space.m) {
+                Image(systemName: folderURL == nil ? "folder" : "folder.fill")
+                    .font(.system(size: 22, weight: .regular))
+                    .foregroundColor(folderURL == nil
+                                     ? (isHovered ? Tokens.accentPrimary : Tokens.textTertiary)
+                                     : Tokens.accentPrimary)
+                    .frame(width: 26)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(folderURL == nil ? "No folder selected" : "Folder selected")
+                        .font(Typography.bodyStrong)
+                        .foregroundColor(Tokens.textPrimary)
+                        .lineLimit(1)
+                    Text(folderURL?.path ?? "Click to browse...")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(Tokens.textTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, Space.m)
+            .padding(.vertical, Space.s + 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Tokens.surfaceSunken.opacity(0.5))
+            .clipShape(RoundedRectangle(cornerRadius: Radius.m))
+            .overlay(
+                RoundedRectangle(cornerRadius: Radius.m)
+                    .stroke(
+                        isHovered ? Tokens.accentPrimary : Tokens.borderStrong.opacity(0.55),
+                        style: StrokeStyle(lineWidth: isHovered ? 1.5 : 1, dash: [5, 4])
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .onDrop(of: [.directory], isTargeted: nil, perform: onDrop)
+        .help("Click to pick a folder, or drag one here")
+        .animation(.easeOut(duration: 0.15), value: isHovered)
+    }
+}
+
+// MARK: - Threshold card
+
+private struct ThresholdCard: View {
+    @Binding var threshold: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Space.s) {
+            HStack(spacing: Space.xs + 2) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Tokens.accentPrimary)
+                Text("STRICTNESS")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(0.6)
+                    .foregroundColor(Tokens.textSecondary)
+                Spacer()
+                Text("\(Int(threshold * 100))%")
+                    .font(Typography.scoreNumeral)
+                    .foregroundColor(Tokens.accentPrimary)
+            }
+            // Wrap the slider in a tinted pill so the white system thumb has
+            // enough contrast against the card in light mode.
+            ZStack {
+                RoundedRectangle(cornerRadius: Radius.s)
+                    .fill(Tokens.surfaceSunken)
+                    .frame(height: 30)
+                Slider(value: $threshold, in: 0.30...0.95)
+                    .tint(Tokens.accentPrimary)
+                    .padding(.horizontal, Space.s)
+            }
+            HStack {
+                Text("MORE RESULTS")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .tracking(0.6)
+                    .foregroundColor(Tokens.textTertiary)
+                Spacer()
+                Text("FEWER FALSE POSITIVES")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .tracking(0.6)
+                    .foregroundColor(Tokens.textTertiary)
+            }
+        }
+        .padding(Space.l - 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Tokens.surface)
+        .clipShape(RoundedRectangle(cornerRadius: Radius.l))
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.l)
+                .stroke(Tokens.border, lineWidth: 1)
+        )
+    }
+}
+
+// MARK: - Find Me button (pinned) + scan progress
+
+private struct FindMeButton: View {
+    @ObservedObject var matcher: FaceMatcher
+    @Binding var consented: Bool
+    let hasSelfie: Bool
+    let hasFolder: Bool
+    let onRun: () -> Void
+
+    private var canRun: Bool { hasSelfie && hasFolder && consented }
+
+    private var disabledReason: String {
+        if !hasSelfie { return "Add a selfie first" }
+        if !hasFolder { return "Pick a folder first" }
+        if !consented { return "Confirm the consent box first" }
+        return ""
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Space.s) {
+            if matcher.isScanning {
+                VStack(spacing: Space.s) {
+                    ProgressView(value: matcher.progress, total: 1.0)
+                        .progressViewStyle(.linear)
+                        .tint(Tokens.accentPrimary)
+                    HStack {
+                        Text(matcher.statusText.localizedCapitalized)
+                            .font(Typography.caption)
+                            .foregroundColor(Tokens.textSecondary)
+                            .lineLimit(1)
+                        Spacer()
+                        Text("\(Int(matcher.progress * 100))%")
+                            .font(Typography.scoreNumeral)
+                            .foregroundColor(Tokens.textPrimary)
+                    }
+                }
+                Button(action: matcher.cancel) {
+                    Text("Cancel scan")
+                        .font(Typography.bodyStrong)
+                        .foregroundColor(Tokens.error)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, Space.s + 2)
+                        .background(Tokens.surface)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: Radius.m)
+                                .stroke(Tokens.error.opacity(0.4), lineWidth: 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: Radius.m))
+                }
+                .buttonStyle(.plain)
+            } else {
+                Button(action: onRun) {
+                    HStack(spacing: Space.s) {
+                        Image(systemName: "wand.and.stars")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text("Find Me")
+                            .font(.system(size: 15, weight: .semibold))
+                    }
+                    .foregroundColor(canRun ? Tokens.onAccent : Tokens.accentPrimary.opacity(0.75))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, Space.m)
+                    .background(canRun ? Tokens.accentPrimary : Tokens.accentPrimary.opacity(0.35))
+                    .clipShape(RoundedRectangle(cornerRadius: Radius.m))
+                }
+                .buttonStyle(.plain)
+                .disabled(!canRun)
+                .keyboardShortcut(.return, modifiers: [.command])
+                .help(canRun ? "⌘↩  Start scanning" : disabledReason)
+            }
+        }
+    }
+}
+
+// MARK: - Consent card (visible privacy gate, sits right above Find Me)
+
+private struct ConsentCard: View {
+    @Binding var consented: Bool
+    /// Opens the full privacy notice sheet. Surfaced both here (in-card button)
+    /// and from the `?` button in the header.
+    let onDetails: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Space.s) {
+            HStack(spacing: Space.xs + 2) {
+                Image(systemName: "lock.shield")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Tokens.accentSecondary)
+                Text("PRIVACY & CONSENT")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(0.6)
+                    .foregroundColor(Tokens.accentSecondary)
+            }
+
+            Text("Face matching runs locally. Embeddings and selected photos never leave this device.")
+                .font(Typography.caption)
+                .foregroundColor(Tokens.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Toggle(isOn: $consented) {
+                Text("I consent to local face matching for this session")
+                    .font(Typography.body)
+                    .foregroundColor(Tokens.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .toggleStyle(.checkbox)
+
+            Button(action: onDetails) {
+                HStack(spacing: Space.xs + 2) {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text("PRIVACY DETAILS")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .tracking(0.6)
+                }
+                .foregroundColor(Tokens.textSecondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, Space.s + 2)
+                .background(Tokens.surface)
+                .clipShape(RoundedRectangle(cornerRadius: Radius.m))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Radius.m)
+                        .stroke(Tokens.border, lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+            .help("Read the full privacy notice")
+        }
+        .padding(Space.l - 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Tokens.scoreHighBg)
+        .clipShape(RoundedRectangle(cornerRadius: Radius.l))
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.l)
+                .stroke(Tokens.accentSecondary.opacity(consented ? 0.55 : 0.30),
+                        lineWidth: consented ? 1.5 : 1)
+        )
+        .animation(.easeInOut(duration: 0.15), value: consented)
+    }
+}
+
+// MARK: - Results header / empty / scanning
+
+private struct ResultsHeader: View {
+    let count: Int
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: Space.xs) {
+                Text("Matches")
+                    .font(.system(size: 28, weight: .bold))
+                    .foregroundColor(Tokens.textPrimary)
+                HStack(spacing: Space.xs + 2) {
+                    Circle()
+                        .fill(Tokens.accentSecondary)
+                        .frame(width: 6, height: 6)
+                    Text(count == 0
+                         ? "Ready when you are"
+                         : "\(count) photo\(count == 1 ? "" : "s") above threshold")
+                        .font(Typography.body)
+                        .foregroundColor(Tokens.textSecondary)
+                }
+            }
+            Spacer()
+        }
+        .padding(.horizontal, Space.xl)
+        .padding(.vertical, Space.l)
+        .background(Tokens.bg)
+    }
+}
+
+/// Shown when a scan completed successfully but found zero matches above threshold.
+private struct NoMatchesState: View {
+    var body: some View {
+        VStack(spacing: Space.xl) {
+            ZStack {
+                Circle()
+                    .fill(Tokens.textTertiary.opacity(0.08))
+                    .frame(width: 110, height: 110)
+                    .blur(radius: 8)
+                Circle()
+                    .fill(Tokens.surfaceElevated)
+                    .frame(width: 88, height: 88)
+                    .overlay(Circle().stroke(Tokens.border, lineWidth: 1))
+                Image(systemName: "person.fill.questionmark")
+                    .font(.system(size: 32, weight: .regular))
+                    .foregroundColor(Tokens.textTertiary)
+            }
+
+            VStack(spacing: Space.s) {
+                Text("No matches found")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundColor(Tokens.textPrimary)
+                Text("Nobody in the scanned folder matched your reference above the current strictness threshold. Try lowering the strictness slider and scanning again.")
+                    .font(Typography.body)
+                    .foregroundColor(Tokens.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
+            }
+
+            HStack(spacing: Space.xs + 2) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Tokens.accentPrimary)
+                Text("Lower strictness → more results")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundColor(Tokens.textTertiary)
+            }
+            .padding(.horizontal, Space.l)
+            .padding(.vertical, Space.s + 2)
+            .background(Tokens.surfaceElevated.opacity(0.6))
+            .clipShape(RoundedRectangle(cornerRadius: Radius.m))
+            .overlay(RoundedRectangle(cornerRadius: Radius.m).stroke(Tokens.border, lineWidth: 1))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(Space.xl)
+    }
+}
+
+/// Empty state for the results panel.
+///
+/// Carries the informational feel of the original ("here's what to do next")
+/// but with a polished modern presentation: hero glyph + descriptive line +
+/// a three-step checklist that ticks off as the user completes prerequisites,
+/// so they always know exactly where they are in the flow.
+private struct ResultsEmptyState: View {
+    let hasSelfie: Bool
+    let hasFolder: Bool
+    let hasConsent: Bool
+
+    private var allReady: Bool { hasSelfie && hasFolder && hasConsent }
+
+    private var title: String {
+        allReady ? "Ready to find you" : "No local matches yet"
+    }
+
+    private var subtitle: String {
+        allReady
+            ? "Press Find Me to scan your folder on-device."
+            : "Provide a reference selfie, point to a folder, and confirm consent — everything runs locally."
+    }
+
+    var body: some View {
+        VStack(spacing: Space.xl) {
+            // Hero glyph — the magnifying-glass spec from the original empty
+            // state, with a soft accent halo for a more luminous feel.
+            ZStack {
+                Circle()
+                    .fill(Tokens.accentSecondary.opacity(0.10))
+                    .frame(width: 110, height: 110)
+                    .blur(radius: 8)
+                Circle()
+                    .fill(Tokens.surfaceElevated)
+                    .frame(width: 88, height: 88)
+                    .overlay(Circle().stroke(Tokens.border, lineWidth: 1))
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 34, weight: .regular))
+                    .foregroundColor(Tokens.textTertiary)
+            }
+
+            VStack(spacing: Space.s) {
+                Text(title)
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundColor(Tokens.textPrimary)
+                Text(subtitle)
+                    .font(Typography.body)
+                    .foregroundColor(Tokens.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
+            }
+
+            // Step checklist — gives the user an at-a-glance map of remaining
+            // setup work. Each row ticks green as the prerequisite is met.
+            VStack(alignment: .leading, spacing: Space.s) {
+                EmptyStateStep(done: hasSelfie,  text: "Add a reference selfie")
+                EmptyStateStep(done: hasFolder,  text: "Choose a folder of photos")
+                EmptyStateStep(done: hasConsent, text: "Confirm privacy consent")
+            }
+            .padding(.horizontal, Space.l)
+            .padding(.vertical, Space.m)
+            .background(Tokens.surfaceElevated.opacity(0.6))
+            .clipShape(RoundedRectangle(cornerRadius: Radius.m))
+            .overlay(
+                RoundedRectangle(cornerRadius: Radius.m)
+                    .stroke(Tokens.border, lineWidth: 1)
+            )
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct EmptyStateStep: View {
+    let done: Bool
+    let text: String
+
+    var body: some View {
+        HStack(spacing: Space.s + 2) {
+            ZStack {
+                Circle()
+                    .fill(done ? Tokens.accentSecondary : Color.clear)
+                    .frame(width: 18, height: 18)
+                Circle()
+                    .stroke(done ? Tokens.accentSecondary : Tokens.borderStrong, lineWidth: 1.5)
+                    .frame(width: 18, height: 18)
+                if done {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(Tokens.onAccent)
+                }
+            }
+            Text(text)
+                .font(Typography.body)
+                .foregroundColor(done ? Tokens.textPrimary : Tokens.textSecondary)
+        }
+        .animation(.easeInOut(duration: 0.15), value: done)
+    }
+}
+
+private struct ScanningPlaceholder: View {
+    let progress: Double
+    let status: String
+
+    var body: some View {
+        VStack(spacing: Space.m) {
+            ProgressView(value: progress, total: 1.0)
+                .progressViewStyle(.linear)
+                .tint(Tokens.accentPrimary)
+                .frame(maxWidth: 280)
+            Text(status.localizedCapitalized)
+                .font(Typography.body)
+                .foregroundColor(Tokens.textSecondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Tokens.bg)
+    }
+}
+
+// MARK: - Results grid
+
+private struct ResultsGrid: View {
+    let results: [MatchResult]
+    @Binding var selectedID: MatchResult.ID?
+    @Binding var lightboxIndex: Int?
+
+    private let columns = [GridItem(.adaptive(minimum: 260, maximum: 360), spacing: Space.m)]
+
+    var body: some View {
+        ScrollView {
+            LazyVGrid(columns: columns, spacing: Space.m) {
+                ForEach(Array(results.enumerated()), id: \.element.id) { index, r in
+                    ResultTile(
+                        result: r,
+                        isSelected: selectedID == r.id
+                    )
+                    .onTapGesture {
+                        selectedID = r.id
+                        lightboxIndex = index
+                    }
+                }
+            }
+            .padding(Space.l)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Tokens.bg)
+    }
+}
+
+// MARK: - Lightbox (full-window, carousel + pinch/scroll zoom)
+
+private struct LightboxView: View {
+    let results: [MatchResult]
+    /// Binding to the current index; set to nil to dismiss.
+    @Binding var currentIndex: Int?
+
+    @State private var fullImage: NSImage? = nil
+    @State private var zoomScale: CGFloat = 1.0
+    @State private var offset: CGSize = .zero
+    @GestureState private var dragOffset: CGSize = .zero
+    @GestureState private var magnifyDelta: CGFloat = 1.0
+    @State private var eventMonitor: Any? = nil
+
+    private var index: Int { currentIndex ?? 0 }
+    private var result: MatchResult { results[index] }
+    private var tier: ScoreTier { ScoreTier.from(result.similarity) }
+    private var pct: Int { Int((result.similarity * 100).rounded()) }
+    private var hasPrev: Bool { index > 0 }
+    private var hasNext: Bool { index < results.count - 1 }
+
+    var body: some View {
+        ZStack {
+            // ── Scrim ────────────────────────────────────────────────────
+            Color.black.opacity(0.88)
+                .ignoresSafeArea()
+                .onTapGesture { dismiss() }
+
+            VStack(spacing: 0) {
+                // ── Toolbar ──────────────────────────────────────────────
+                HStack(spacing: Space.s) {
+                    // Score badge
+                    HStack(spacing: 6) {
+                        Circle().fill(tier.color).frame(width: 7, height: 7)
+                        Text("\(pct)%")
+                            .font(.system(size: 13, weight: .bold, design: .monospaced))
+                            .foregroundColor(.white)
+                    }
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(.ultraThinMaterial)
+                    .clipShape(Capsule())
+
+                    // Index counter
+                    if results.count > 1 {
+                        Text("\(index + 1) / \(results.count)")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.55))
+                    }
+
+                    Text(result.fileURL.lastPathComponent)
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.75))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    Spacer()
+
+                    HStack(spacing: Space.s) {
+                        Button { zoomOut() } label: { toolbarIcon("minus.magnifyingglass") }
+                            .buttonStyle(.plain).help("Zoom out")
+
+                        Button { resetZoom() } label: {
+                            Text(zoomScale == 1.0 ? "1×" : String(format: "%.1f×", zoomScale))
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundColor(.white)
+                                .frame(minWidth: 36)
+                                .frame(height: 30)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Capsule())
+                        }.buttonStyle(.plain).help("Reset zoom")
+
+                        Button { zoomIn() } label: { toolbarIcon("plus.magnifyingglass") }
+                            .buttonStyle(.plain).help("Zoom in")
+
+                        Button(action: revealInFinder) { toolbarIcon("arrow.up.right.square") }
+                            .buttonStyle(.plain).help("Reveal in Finder")
+
+                        Button(action: dismiss) { toolbarIcon("xmark") }
+                            .buttonStyle(.plain).help("Close (Esc)")
+                    }
+                }
+                .padding(.horizontal, Space.l)
+                .padding(.vertical, Space.m)
+                .background(.ultraThinMaterial)
+
+                // ── Photo + side arrows ───────────────────────────────────
+                ZStack {
+                    GeometryReader { geo in
+                        let effectiveScale = zoomScale * magnifyDelta
+                        let effectiveOffset = CGSize(
+                            width: offset.width + dragOffset.width,
+                            height: offset.height + dragOffset.height
+                        )
+
+                        ZStack {
+                            if let img = fullImage {
+                                Image(nsImage: img)
+                                    .resizable()
+                                    .scaledToFit()
+                                    .scaleEffect(effectiveScale)
+                                    .offset(effectiveOffset)
+                                    .gesture(
+                                        MagnifyGesture()
+                                            .updating($magnifyDelta) { val, state, _ in state = val.magnification }
+                                            .onEnded { val in
+                                                zoomScale = max(1.0, min(8.0, zoomScale * val.magnification))
+                                                clampOffset(in: geo.size)
+                                            }
+                                    )
+                                    .gesture(
+                                        DragGesture()
+                                            .updating($dragOffset) { val, state, _ in state = val.translation }
+                                            .onEnded { val in
+                                                offset = CGSize(
+                                                    width: offset.width + val.translation.width,
+                                                    height: offset.height + val.translation.height
+                                                )
+                                                clampOffset(in: geo.size)
+                                            }
+                                    )
+                                    .onScrollWheel { delta in
+                                        let factor = 1.0 - delta.y * 0.05
+                                        zoomScale = max(1.0, min(8.0, zoomScale * factor))
+                                        clampOffset(in: geo.size)
+                                    }
+                            } else {
+                                ProgressView().scaleEffect(1.2).tint(.white)
+                            }
+                        }
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                                if zoomScale > 1.0 { resetZoom() } else { zoomScale = 2.5 }
+                            }
+                        }
+                    }
+
+                    // ── Carousel arrows ───────────────────────────────────
+                    HStack {
+                        CarouselArrow(direction: .prev, enabled: hasPrev) { navigateTo(index - 1) }
+                        Spacer()
+                        CarouselArrow(direction: .next, enabled: hasNext) { navigateTo(index + 1) }
+                    }
+                    .padding(.horizontal, Space.l)
+                }
+                // Clip the photo+arrows layer so scaleEffect can never
+                // overflow into the toolbar above or the screen edges.
+                .clipped()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .onAppear {
+            loadImage(for: result)
+            startKeyMonitor()
+        }
+        .onDisappear {
+            if let m = eventMonitor { NSEvent.removeMonitor(m); eventMonitor = nil }
+        }
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    @ViewBuilder
+    private func toolbarIcon(_ name: String) -> some View {
+        Image(systemName: name)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundColor(.white)
+            .frame(width: 30, height: 30)
+            .background(.ultraThinMaterial)
+            .clipShape(Circle())
+    }
+
+    private func navigateTo(_ newIndex: Int) {
+        guard results.indices.contains(newIndex) else { return }
+        resetZoom()
+        fullImage = nil
+        currentIndex = newIndex
+        loadImage(for: results[newIndex])
+    }
+
+    private func loadImage(for r: MatchResult) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let img = NSImage(contentsOf: r.fileURL)
+            DispatchQueue.main.async { fullImage = img }
+        }
+    }
+
+    private func dismiss() { currentIndex = nil }
+
+    private func startKeyMonitor() {
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            switch event.keyCode {
+            case 123: navigateTo(index - 1); return nil   // ← left arrow
+            case 124: navigateTo(index + 1); return nil   // → right arrow
+            case 53:  dismiss();             return nil   // Esc
+            default:  return event
+            }
+        }
+    }
+
+    private func zoomIn()  { withAnimation(.easeOut(duration: 0.2)) { zoomScale = min(8.0, zoomScale * 1.5) } }
+    private func zoomOut() {
+        withAnimation(.easeOut(duration: 0.2)) {
+            zoomScale = max(1.0, zoomScale / 1.5)
+            if zoomScale <= 1.0 { offset = .zero }
+        }
+    }
+    private func resetZoom() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { zoomScale = 1.0; offset = .zero }
+    }
+    private func clampOffset(in size: CGSize) {
+        let maxX = max(0, (size.width  * (zoomScale - 1)) / 2)
+        let maxY = max(0, (size.height * (zoomScale - 1)) / 2)
+        offset = CGSize(
+            width:  max(-maxX, min(maxX, offset.width)),
+            height: max(-maxY, min(maxY, offset.height))
+        )
+    }
     private func revealInFinder() {
         NSWorkspace.shared.activateFileViewerSelecting([result.fileURL])
     }
 }
+
+// ── Carousel arrow button ─────────────────────────────────────────────────
+
+private enum ArrowDirection { case prev, next }
+
+private struct CarouselArrow: View {
+    let direction: ArrowDirection
+    let enabled: Bool
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: direction == .prev ? "chevron.left" : "chevron.right")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundColor(.white.opacity(enabled ? 1.0 : 0.25))
+                .frame(width: 44, height: 44)
+                .background(.ultraThinMaterial.opacity(isHovered && enabled ? 1 : 0.55))
+                .clipShape(Circle())
+                .scaleEffect(isHovered && enabled ? 1.08 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .onHover { isHovered = $0 }
+        .animation(.easeOut(duration: 0.15), value: isHovered)
+        .help(direction == .prev ? "Previous photo (←)" : "Next photo (→)")
+    }
+}
+
+// Scroll-wheel modifier for zoom support
+private struct ScrollWheelModifier: ViewModifier {
+    let action: (CGPoint) -> Void
+    func body(content: Content) -> some View {
+        content.background(ScrollWheelView(action: action))
+    }
+}
+
+private struct ScrollWheelView: NSViewRepresentable {
+    let action: (CGPoint) -> Void
+    func makeNSView(context: Context) -> _ScrollWheelNSView {
+        let v = _ScrollWheelNSView()
+        v.action = action
+        return v
+    }
+    func updateNSView(_ nsView: _ScrollWheelNSView, context: Context) {}
+}
+
+class _ScrollWheelNSView: NSView {
+    var action: ((CGPoint) -> Void)?
+    override func scrollWheel(with event: NSEvent) {
+        action?(CGPoint(x: event.deltaX, y: event.deltaY))
+    }
+}
+
+extension View {
+    func onScrollWheel(_ action: @escaping (CGPoint) -> Void) -> some View {
+        modifier(ScrollWheelModifier(action: action))
+    }
+}
+
+// MARK: - Result tile
+
+private struct ResultTile: View {
+    let result: MatchResult
+    let isSelected: Bool
+
+    @State private var thumbnail: NSImage? = nil
+    @State private var isHovered = false
+
+    private var tier: ScoreTier { ScoreTier.from(result.similarity) }
+    private var pct: Int { Int((result.similarity * 100).rounded()) }
+
+    private var glowRadius: CGFloat {
+        switch tier {
+        case .high:   return isHovered ? 22 : 14
+        case .medium: return isHovered ? 12 : 6
+        case .low:    return 0
+        }
+    }
+
+    private var glowOpacity: Double {
+        switch tier {
+        case .high:   return 0.50
+        case .medium: return 0.25
+        case .low:    return 0.0
+        }
+    }
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            // ── Photo area ──────────────────────────────────────────────
+            ZStack(alignment: .topTrailing) {
+                // Background fill while loading
+                Rectangle()
+                    .fill(Tokens.surfaceSunken)
+
+                if let thumbnail {
+                    Image(nsImage: thumbnail)
+                        .resizable()
+                        .scaledToFill()
+                        .transition(.opacity.animation(.easeIn(duration: 0.25)))
+                } else {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+
+                // Score badge — top-right corner
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(tier.color)
+                        .frame(width: 6, height: 6)
+                    Text("\(pct)%")
+                        .font(.system(size: 13, weight: .bold, design: .monospaced))
+                        .foregroundColor(.white)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(.ultraThinMaterial)
+                .clipShape(Capsule())
+                .padding(10)
+            }
+            .aspectRatio(4/3, contentMode: .fit)
+            .clipped()
+
+            // ── Bottom overlay bar ──────────────────────────────────────
+            HStack(spacing: Space.xs) {
+                Image(systemName: "photo")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.white.opacity(0.7))
+                Text(result.fileURL.lastPathComponent)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+                // People count badge
+                if result.faceCount > 1 {
+                    HStack(spacing: 3) {
+                        Image(systemName: "person.2.fill")
+                            .font(.system(size: 9))
+                        Text("\(result.faceCount)")
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    }
+                    .foregroundColor(.white.opacity(0.8))
+                }
+                Button(action: revealInFinder) {
+                    Image(systemName: "arrow.up.right.square")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.white.opacity(0.8))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Reveal in Finder")
+            }
+            .padding(.horizontal, Space.m)
+            .padding(.vertical, Space.s + 2)
+            .background(
+                LinearGradient(
+                    colors: [.black.opacity(0.0), .black.opacity(0.72)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        }
+        .clipShape(RoundedRectangle(cornerRadius: Radius.l))
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.l)
+                .stroke(
+                    isSelected ? Tokens.accentPrimary : tier.color.opacity(tier == .low ? 0.18 : 0.60),
+                    lineWidth: isSelected ? 2.5 : (tier == .high ? 1.5 : 1)
+                )
+        )
+        .shadow(color: tier.color.opacity(glowOpacity), radius: glowRadius, x: 0, y: 4)
+        .scaleEffect(isHovered ? 1.02 : 1.0)
+        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: isHovered)
+        .onHover { isHovered = $0 }
+        .onAppear(perform: loadThumbnailAsync)
+        .accessibilityLabel("\(result.fileURL.lastPathComponent), \(tier.label), \(pct) percent")
+    }
+
+    private func loadThumbnailAsync() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let image = NSImage(contentsOf: result.fileURL) {
+                let resized = image.resized(to: NSSize(width: 480, height: 360))
+                DispatchQueue.main.async { self.thumbnail = resized }
+            }
+        }
+    }
+
+    private func revealInFinder() {
+        NSWorkspace.shared.activateFileViewerSelecting([result.fileURL])
+    }
+}
+
+// MARK: - Privacy sheet
 
 struct PrivacyNoticeSheet: View {
     @Binding var isPresented: Bool
     @Binding var hasAcceptedBiometricNotice: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
+        VStack(alignment: .leading, spacing: Space.l) {
+            HStack(spacing: Space.s) {
                 Image(systemName: "lock.shield")
-                    .font(.system(size: 22))
-                    .foregroundColor(Color(NSColor(red: 0.83, green: 0.69, blue: 0.22, alpha: 1.0)))
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundColor(Tokens.accentSecondary)
                 Text("Privacy Summary")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundColor(Color(NSColor(red: 0.88, green: 0.85, blue: 0.82, alpha: 1.0)))
+                    .font(Typography.h2)
+                    .foregroundColor(Tokens.textPrimary)
             }
 
-            VStack(alignment: .leading, spacing: 10) {
-                PrivacyNoticeRow(title: "Purpose", message: "The app compares a selfie with faces found in image files you choose, only to show possible matches in this session.")
-                PrivacyNoticeRow(title: "Local Processing", message: "Face detection, crops, and FaceNet embeddings are processed on this device. The app has outgoing network access disabled.")
-                PrivacyNoticeRow(title: "Storage", message: "The app does not write selfies, selected photos, embeddings, or match results to its own storage. Clear Session removes in-memory state.")
-                PrivacyNoticeRow(title: "Control", message: "You can cancel scanning at any time and choose a different folder or selfie. Only user-selected files are read.")
+            VStack(alignment: .leading, spacing: Space.m) {
+                PrivacyNoticeRow(
+                    title: "Purpose",
+                    message: "The app compares a selfie with faces found in image files you choose, only to show possible matches in this session."
+                )
+                PrivacyNoticeRow(
+                    title: "Local processing",
+                    message: "Face detection, crops, and FaceNet embeddings run on this device. The app target has outgoing network access disabled."
+                )
+                PrivacyNoticeRow(
+                    title: "Storage",
+                    message: "The app does not write selfies, selected photos, embeddings, or match results to its own storage. Clear Session removes in-memory state."
+                )
+                PrivacyNoticeRow(
+                    title: "Control",
+                    message: "Cancel scanning at any time and choose a different folder or selfie. Only user-selected files are read."
+                )
             }
 
             Toggle(isOn: $hasAcceptedBiometricNotice) {
-                Text("I consent to local face matching for this session")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(Color(NSColor(red: 0.88, green: 0.85, blue: 0.82, alpha: 1.0)))
+                Text("I consent to local face matching for this session.")
+                    .font(Typography.body)
+                    .foregroundColor(Tokens.textPrimary)
             }
             .toggleStyle(.checkbox)
 
             HStack {
                 Spacer()
-                Button("Close") {
-                    isPresented = false
-                }
-                .keyboardShortcut(.cancelAction)
-
+                Button("Close") { isPresented = false }
+                    .keyboardShortcut(.cancelAction)
                 Button("Accept and Continue") {
                     hasAcceptedBiometricNotice = true
                     isPresented = false
@@ -684,9 +1532,9 @@ struct PrivacyNoticeSheet: View {
                 .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(24)
-        .frame(width: 520)
-        .background(Color(NSColor(red: 0.03, green: 0.03, blue: 0.03, alpha: 1.0)))
+        .padding(Space.xl)
+        .frame(width: 560)
+        .background(Tokens.surface)
     }
 }
 
@@ -695,42 +1543,36 @@ struct PrivacyNoticeRow: View {
     let message: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: Space.xs) {
             Text(title)
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                .foregroundColor(Color(NSColor(red: 0.83, green: 0.69, blue: 0.22, alpha: 1.0)))
+                .font(Typography.label)
+                .foregroundColor(Tokens.accentPrimary)
             Text(message)
-                .font(.system(size: 11))
-                .foregroundColor(Color(NSColor(red: 0.55, green: 0.55, blue: 0.55, alpha: 1.0)))
+                .font(Typography.body)
+                .foregroundColor(Tokens.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
 
-// Quick extension for NSImage scaling helper
+// MARK: - NSImage helper
+
 extension NSImage {
     func resized(to newSize: NSSize) -> NSImage {
         let destRect = NSRect(origin: .zero, size: newSize)
         let newImage = NSImage(size: newSize)
-        
         newImage.lockFocus()
         self.draw(in: destRect, from: NSRect(origin: .zero, size: self.size), operation: .copy, fraction: 1.0)
         newImage.unlockFocus()
-        
         return newImage
     }
 }
 
-// System color compatibility indicators
-extension Color {
-    static let emerald = Color(NSColor(red: 0.20, green: 0.78, blue: 0.35, alpha: 1.0))
-}
-
-// MARK: - FaceTime HD Camera Capture Components
+// MARK: - Camera capture sheet
 
 struct CameraPreviewView: NSViewRepresentable {
     let session: AVCaptureSession
-    
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         let previewLayer = AVCaptureVideoPreviewLayer(session: session)
@@ -739,7 +1581,7 @@ struct CameraPreviewView: NSViewRepresentable {
         view.wantsLayer = true
         return view
     }
-    
+
     func updateNSView(_ nsView: NSView, context: Context) {
         nsView.layer?.sublayers?.forEach { layer in
             if let previewLayer = layer as? AVCaptureVideoPreviewLayer {
@@ -751,7 +1593,7 @@ struct CameraPreviewView: NSViewRepresentable {
 
 class CameraDelegateHelper: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     nonisolated(unsafe) var onFrame: ((CMSampleBuffer) -> Void)?
-    
+
     nonisolated func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         onFrame?(sampleBuffer)
     }
@@ -761,16 +1603,14 @@ class CameraManager: ObservableObject {
     let session = AVCaptureSession()
     @Published var permissionGranted = false
     @Published var currentImage: NSImage? = nil
-    
+
     private var videoOutput = AVCaptureVideoDataOutput()
     private let sessionQueue = DispatchQueue(label: "camera.session.queue")
-    private let context = CIContext(options: [.useSoftwareRenderer: false]) // Optimized for Apple Silicon GPU
+    private let context = CIContext(options: [.useSoftwareRenderer: false])
     private let delegateHelper = CameraDelegateHelper()
-    
-    init() {
-        checkPermission()
-    }
-    
+
+    init() { checkPermission() }
+
     func checkPermission() {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
@@ -780,86 +1620,77 @@ class CameraManager: ObservableObject {
             AVCaptureDevice.requestAccess(for: .video) { granted in
                 DispatchQueue.main.async {
                     self.permissionGranted = granted
-                    if granted {
-                        self.setupSession()
-                    }
+                    if granted { self.setupSession() }
                 }
             }
         default:
             DispatchQueue.main.async { self.permissionGranted = false }
         }
     }
-    
+
     func setupSession() {
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
             self.session.beginConfiguration()
-            
+
             guard let videoDevice = AVCaptureDevice.default(for: .video) else {
-                #if DEBUG
-                print("No video device found")
-                #endif
                 self.session.commitConfiguration()
                 return
             }
-            
+
             do {
                 let videoInput = try AVCaptureDeviceInput(device: videoDevice)
-                if self.session.canAddInput(videoInput) {
-                    self.session.addInput(videoInput)
-                }
-                
+                if self.session.canAddInput(videoInput) { self.session.addInput(videoInput) }
+
                 self.videoOutput.alwaysDiscardsLateVideoFrames = true
-                self.videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)]
-                
-                self.delegateHelper.onFrame = { [weak self] sampleBuffer in
-                    self?.handleSampleBuffer(sampleBuffer)
-                }
-                
+                self.videoOutput.videoSettings = [
+                    kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)
+                ]
+
+                self.delegateHelper.onFrame = { [weak self] sb in self?.handleSampleBuffer(sb) }
+
                 if self.session.canAddOutput(self.videoOutput) {
                     self.session.addOutput(self.videoOutput)
-                    self.videoOutput.setSampleBufferDelegate(self.delegateHelper, queue: DispatchQueue(label: "sample.buffer.queue"))
+                    self.videoOutput.setSampleBufferDelegate(
+                        self.delegateHelper,
+                        queue: DispatchQueue(label: "sample.buffer.queue")
+                    )
                 }
             } catch {
                 #if DEBUG
                 print("Could not initialize camera input: \(error.localizedDescription)")
                 #endif
             }
-            
+
             self.session.commitConfiguration()
             self.session.startRunning()
         }
     }
-    
+
     func start() {
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
-            if !self.session.isRunning {
-                self.session.startRunning()
-            }
+            if !self.session.isRunning { self.session.startRunning() }
         }
     }
-    
+
     func stop() {
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
-            if self.session.isRunning {
-                self.session.stopRunning()
-            }
+            if self.session.isRunning { self.session.stopRunning() }
         }
     }
-    
+
     private func handleSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
         guard let cvBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let ciImage = CIImage(cvImageBuffer: cvBuffer)
         let mirrored = ciImage.oriented(.upMirrored)
-        
+
         guard let cgImage = context.createCGImage(mirrored, from: mirrored.extent) else { return }
-        
+
         let size = NSSize(width: cgImage.width, height: cgImage.height)
         let nsImage = NSImage(cgImage: cgImage, size: size)
-        
-        // CRITICAL FIX: Always push UI updates back to the Main Thread
+
         DispatchQueue.main.async { [weak self] in
             self?.currentImage = nsImage
         }
@@ -871,118 +1702,117 @@ struct CameraCaptureSheet: View {
     @Binding var isPresented: Bool
     var onCapture: (NSImage) -> Void
     var onBrowseFile: () -> Void
-    
+
     var body: some View {
-        VStack(spacing: 16) {
-            Text("FACETIME HD SELFIE CAMERA")
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .foregroundColor(Color(NSColor(red: 0.83, green: 0.69, blue: 0.22, alpha: 1.0)))
-                .padding(.top, 20)
-            
+        VStack(spacing: Space.l) {
+            HStack(spacing: Space.s) {
+                Image(systemName: "camera")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(Tokens.accentPrimary)
+                Text("Take a reference selfie")
+                    .font(Typography.h3)
+                    .foregroundColor(Tokens.textPrimary)
+                Spacer()
+            }
+
             if cameraManager.permissionGranted {
                 ZStack {
                     CameraPreviewView(session: cameraManager.session)
-                        .frame(width: 420, height: 300)
-                        .cornerRadius(12)
+                        .frame(width: 460, height: 320)
+                        .clipShape(RoundedRectangle(cornerRadius: Radius.l))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color(white: 0.16), lineWidth: 1)
+                            RoundedRectangle(cornerRadius: Radius.l)
+                                .stroke(Tokens.border, lineWidth: 1)
                         )
-                    
-                    // Centered oval guideline for alignment
                     Ellipse()
-                        .stroke(Color(NSColor(red: 0.83, green: 0.69, blue: 0.22, alpha: 0.4)), style: StrokeStyle(lineWidth: 1.5, dash: [5]))
+                        .stroke(Tokens.accentSecondary.opacity(0.55),
+                                style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
                         .frame(width: 200, height: 250)
                 }
             } else {
-                VStack(spacing: 12) {
+                VStack(spacing: Space.s) {
                     Image(systemName: "camera.fill")
-                        .font(.system(size: 32))
-                        .foregroundColor(Color(white: 0.2))
-                    Text("WAITING FOR CAMERA ACCESS PERMISSION...")
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundColor(Color(white: 0.4))
+                        .font(.system(size: 28))
+                        .foregroundColor(Tokens.textTertiary)
+                    Text("Waiting for camera access…")
+                        .font(Typography.body)
+                        .foregroundColor(Tokens.textSecondary)
                 }
-                .frame(width: 420, height: 300)
-                .background(Color.black.opacity(0.8))
-                .cornerRadius(12)
+                .frame(width: 460, height: 320)
+                .background(Tokens.surfaceSunken)
+                .clipShape(RoundedRectangle(cornerRadius: Radius.l))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color(white: 0.1), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: Radius.l)
+                        .stroke(Tokens.border, lineWidth: 1)
                 )
             }
 
-            Text("Camera frames are used only to create the in-memory selfie reference for local matching.")
-                .font(.system(size: 9))
-                .foregroundColor(Color(white: 0.45))
+            Text("Frames are kept only in memory for this session.")
+                .font(Typography.caption)
+                .foregroundColor(Tokens.textTertiary)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 380)
-            
-            HStack(spacing: 16) {
-                Button(action: {
+
+            HStack(spacing: Space.m) {
+                Button {
                     cameraManager.stop()
                     isPresented = false
                     onBrowseFile()
-                }) {
+                } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "folder")
-                        Text("ALEGE FIȘIER INSTEAD")
+                        Text("Choose file")
                     }
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(Color(white: 0.8))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(Color(white: 0.1))
-                    .cornerRadius(8)
+                    .font(Typography.bodyStrong)
+                    .foregroundColor(Tokens.textPrimary)
+                    .padding(.horizontal, Space.l)
+                    .padding(.vertical, Space.s + 2)
+                    .background(Tokens.surfaceSunken)
+                    .clipShape(RoundedRectangle(cornerRadius: Radius.m))
                 }
-                .buttonStyle(PlainButtonStyle())
-                
-                Button(action: {
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Button {
+                    cameraManager.stop()
+                    isPresented = false
+                } label: {
+                    Text("Cancel")
+                        .font(Typography.bodyStrong)
+                        .foregroundColor(Tokens.textSecondary)
+                        .padding(.horizontal, Space.l)
+                        .padding(.vertical, Space.s + 2)
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
+
+                Button {
                     if let image = cameraManager.currentImage {
                         cameraManager.stop()
                         onCapture(image)
                         isPresented = false
                     }
-                }) {
+                } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "camera.fill")
-                        Text("FA SELFIE / CAPTURE")
+                        Text("Capture")
                     }
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(.black)
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 10)
-                    .background(Color(NSColor(red: 0.83, green: 0.69, blue: 0.22, alpha: 1.0)))
-                    .cornerRadius(8)
+                    .font(Typography.bodyStrong)
+                    .foregroundColor(Tokens.onAccent)
+                    .padding(.horizontal, Space.l)
+                    .padding(.vertical, Space.s + 2)
+                    .background(Tokens.accentPrimary)
+                    .clipShape(RoundedRectangle(cornerRadius: Radius.m))
                 }
-                .buttonStyle(PlainButtonStyle())
+                .buttonStyle(.plain)
+                .keyboardShortcut(.defaultAction)
                 .disabled(cameraManager.currentImage == nil)
-                
-                Button(action: {
-                    cameraManager.stop()
-                    isPresented = false
-                }) {
-                    Text("RENUNȚĂ / CANCEL")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .foregroundColor(.red)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .background(Color.red.opacity(0.08))
-                        .cornerRadius(8)
-                }
-                .buttonStyle(PlainButtonStyle())
             }
-            .padding(.bottom, 20)
         }
-        .padding(.horizontal, 24)
-        .background(Color(NSColor(red: 0.03, green: 0.03, blue: 0.03, alpha: 1.0)))
-        .frame(width: 480, height: 420)
-        .onAppear {
-            cameraManager.start()
-        }
-        .onDisappear {
-            cameraManager.stop()
-        }
+        .padding(Space.xl)
+        .frame(width: 540)
+        .background(Tokens.surface)
+        .onAppear { cameraManager.start() }
+        .onDisappear { cameraManager.stop() }
     }
 }
-
