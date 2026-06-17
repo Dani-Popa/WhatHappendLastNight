@@ -82,36 +82,30 @@ struct ContentView: View {
 
     private var header: some View {
         HStack(spacing: Space.m) {
-            Text("What Happened Last Night")
-                .font(Typography.h2)
-                .foregroundColor(Tokens.textPrimary)
+            // ── Left: wordmark + subtitle ───────────────────────────────
+            VStack(alignment: .leading, spacing: 2) {
+                Text("What Happened Last Night")
+                    .font(.system(size: 18, weight: .semibold, design: .serif))
+                    .italic()
+                    .foregroundColor(Tokens.textPrimary)
+                Text("LOCAL BIOMETRIC RETRIEVAL SYSTEM / OFFLINE CORE V1")
+                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                    .tracking(0.8)
+                    .foregroundColor(Tokens.textTertiary)
+            }
 
+            // Offline badge — sits right of the wordmark
             OfflineBadge()
 
             Spacer()
 
-            // Reference identity + an inline "Clear session" sit on the far
-            // right so the user can discard the session without scrolling.
+            // ── Right: identity strip + clear session (unchanged) ───────
             if let selfie = targetSelfie {
-                IdentityStrip(image: selfie, label: targetSelfieURL?.lastPathComponent ?? "Selfie captured")
-
-                Button(action: clearLocalData) {
-                    HStack(spacing: Space.xs) {
-                        Image(systemName: "trash")
-                        Text("CLEAR SESSION")
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .tracking(0.6)
-                    }
-                    .foregroundColor(Tokens.textSecondary)
-                    .padding(.horizontal, Space.s + 2)
-                    .padding(.vertical, 6)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: Radius.s)
-                            .stroke(Tokens.border, lineWidth: 1)
-                    )
-                }
-                .buttonStyle(.plain)
-                .help("Discard the selfie, folder, and any in-memory matches")
+                IdentityStrip(
+                    image: selfie,
+                    label: targetSelfieURL?.lastPathComponent ?? "Selfie captured",
+                    onClear: clearLocalData
+                )
             }
 
             ThemeToggleButton()
@@ -468,6 +462,9 @@ private struct OfflineBadge: View {
 private struct IdentityStrip: View {
     let image: NSImage
     let label: String
+    let onClear: () -> Void
+
+    @State private var isHovered = false
 
     var body: some View {
         HStack(spacing: Space.s) {
@@ -488,6 +485,19 @@ private struct IdentityStrip: View {
                     .truncationMode(.middle)
                     .frame(maxWidth: 180, alignment: .leading)
             }
+            // ── X dismiss button ─────────────────────────────────────
+            Button(action: onClear) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(isHovered ? Tokens.error : Tokens.textTertiary)
+                    .frame(width: 18, height: 18)
+                    .background(isHovered ? Tokens.error.opacity(0.12) : Color.clear)
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .onHover { isHovered = $0 }
+            .help("Remove reference photo")
+            .animation(.easeOut(duration: 0.12), value: isHovered)
         }
         .padding(.horizontal, Space.s + 2)
         .padding(.vertical, 5)
