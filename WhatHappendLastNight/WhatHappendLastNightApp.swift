@@ -1,17 +1,14 @@
-//
-//  WhatHappendLastNightApp.swift
-//  WhatHappendLastNight
-//
-//  Created by Popa, Daniel on 29/05/2026.
-//
-
 import SwiftUI
 
 @main
-struct WhatHappendLastNightApp: App {
+struct WhatHappenedLastNightApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .preferredColorScheme(.dark) // Lock to eye-soothing night/midnight mode
         }
+        .windowStyle(.titleBar)
+        .windowToolbarStyle(.unifiedCompact)
     }
 }
+
