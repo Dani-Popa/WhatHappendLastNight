@@ -95,7 +95,9 @@ final class FaceEmbeddingModel {
         self.outputName = firstOutput.key
         self.imageSize = Self.inferImageSize(from: firstInput.value) ?? fallbackImageSize
 
+        #if DEBUG
         print("Loaded FaceNet model: \(modelURL.lastPathComponent), input: \(inputName), output: \(outputName), size: \(imageSize)x\(imageSize)")
+        #endif
     }
 
     private static func findCompiledModelURL(modelNames: [String]) throws -> URL {
@@ -326,7 +328,9 @@ class FaceMatcher: ObservableObject {
         } catch {
             self.embeddingModel = nil
             self.modelLoadError = error
+            #if DEBUG
             print("FaceNet model load failed: \(error.localizedDescription)")
+            #endif
         }
     }
 
@@ -334,6 +338,16 @@ class FaceMatcher: ObservableObject {
     func cancel() {
         currentTask?.cancel()
         cleanupScanningState(finalStatus: "SCAN CANCELED BY USER")
+    }
+
+    func clearResults() {
+        currentTask?.cancel()
+        DispatchQueue.main.async {
+            self.isScanning = false
+            self.progress = 0.0
+            self.statusText = "STANDBY"
+            self.matchedResults.removeAll()
+        }
     }
 
     private func cleanupScanningState(finalStatus: String) {
@@ -455,23 +469,22 @@ class FaceMatcher: ObservableObject {
                     }
 
                     if bestSimilarity >= minimumSimilarity {
-                        print("MATCH", currentFileName, "similarity:", bestSimilarity, "threshold:", minimumSimilarity)
                         localMatches.append(MatchResult(fileURL: fileURL, faceCount: totalPeopleInPhoto))
 
                         await MainActor.run {
                             self.matchedResults = localMatches
                         }
-                    } else if bestSimilarity >= 0 {
-                        print("NO MATCH", currentFileName, "best similarity:", bestSimilarity, "threshold:", minimumSimilarity)
                     }
                 } catch {
-                    print("FaceNet recognition dropped file \(currentFileName): \(error.localizedDescription)")
+                    #if DEBUG
+                    print("FaceNet recognition skipped one selected file: \(error.localizedDescription)")
+                    #endif
                 }
             }
 
             await MainActor.run {
                 self.isScanning = false
-                self.statusText = localMatches.isEmpty ? "FACENET SCAN FINISHED: NO MATCH" : "FACENET SCAN COMPLETE: \(localMatches.count) TARGETS FOUND"
+                self.statusText = localMatches.isEmpty ? "FACENET SCAN FINISHED: NO LOCAL RESULTS" : "FACENET SCAN COMPLETE: \(localMatches.count) TARGETS FOUND"
             }
         }
 

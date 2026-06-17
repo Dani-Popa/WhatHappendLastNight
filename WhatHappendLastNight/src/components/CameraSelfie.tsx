@@ -7,7 +7,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Camera, Upload, Trash2, User, Sparkles, RefreshCw, AlertCircle } from 'lucide-react';
 
 interface CameraSelfieProps {
-  onSelfieSelected: (base64: string | null, isDemo?: boolean, demoId?: string) => void;
+  onSelfieSelected: (referenceImage: string | null, isDemo?: boolean, demoId?: string) => void;
   selectedSelfie: string | null;
   selectedDemoId: string | null;
 }
@@ -45,7 +45,6 @@ export const CameraSelfie: React.FC<CameraSelfieProps> = ({
       }
       setIsCameraActive(true);
     } catch (err: any) {
-      console.error('Camera Access Error:', err);
       setCameraError('Could not access camera. Please check your system/browser permissions.');
       setActiveTab('upload');
     }
@@ -217,7 +216,7 @@ export const CameraSelfie: React.FC<CameraSelfieProps> = ({
               <div className="absolute inset-x-0 top-0 h-0.5 bg-[#D4AF37] opacity-65 shadow-[0_0_8px_rgb(212,175,55)] animate-bounce" />
             </div>
             <p className="text-xs text-[#E0D8D0] mt-3 font-mono uppercase tracking-[0.15em]">
-              {selectedDemoId ? (selectedDemoId.includes('alex') ? 'Alex Biometrics Locked' : 'Chloe Biometrics Locked') : 'Identity Ref Locked'}
+              {selectedDemoId ? (selectedDemoId.includes('alex') ? 'Alex demo selected' : 'Chloe demo selected') : 'Reference ready'}
             </p>
           </div>
         ) : (
@@ -336,7 +335,7 @@ export const CameraSelfie: React.FC<CameraSelfieProps> = ({
       </div>
 
       <div className="text-[9px] text-center text-[#555] uppercase tracking-wider mt-3 border-t border-[#222] pt-2 font-mono">
-        {selectedSelfie ? 'Biometric reference lock complete.' : 'Reference selfie required to scan directory files.'}
+        {selectedSelfie ? 'Reference is held in this session only.' : 'Reference selfie required before matching.'}
       </div>
     </div>
   );

@@ -37,29 +37,15 @@ export const AlbumSelector: React.FC<AlbumSelectorProps> = ({
     
     if (validImageFiles.length === 0) return;
 
-    const newPhotos: CandidatePhoto[] = [];
-    let processedCount = 0;
+    const newPhotos: CandidatePhoto[] = validImageFiles.map((file) => ({
+      id: `custom-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      name: file.name,
+      url: URL.createObjectURL(file),
+      size: file.size,
+    }));
 
-    validImageFiles.forEach((file) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (typeof reader.result === 'string') {
-          newPhotos.push({
-            id: `custom-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-            name: file.name,
-            url: URL.createObjectURL(file), // Free memory when cleared
-            base64: reader.result,
-            size: file.size,
-          });
-        }
-        processedCount++;
-        if (processedCount === validImageFiles.length) {
-          onCustomPhotosLoaded([...customPhotos, ...newPhotos]);
-          onEventSelected(null); // Unselect demo event if custom files are selected
-        }
-      };
-      reader.readAsDataURL(file);
-    });
+    onCustomPhotosLoaded([...customPhotos, ...newPhotos]);
+    onEventSelected(null);
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -301,9 +287,9 @@ export const AlbumSelector: React.FC<AlbumSelectorProps> = ({
                 <div className="text-[10px] text-[#555] leading-relaxed font-mono flex items-start gap-1.5 bg-[#0A0A0A] p-3 rounded-lg border border-[#222]">
                   <HelpCircle className="w-3.5 h-3.5 text-[#D4AF37] flex-shrink-0 mt-0.5" />
                   <div>
-                    <p className="text-[#888] font-semibold uppercase tracking-wider text-[9px]">Using Real Face Detection</p>
+                    <p className="text-[#888] font-semibold uppercase tracking-wider text-[9px]">Privacy-First Browser Mode</p>
                     <p className="mt-1 leading-normal text-[8px] uppercase tracking-wide">
-                      By adding your own files, the server uses standard multimodal vision prompts to scan and match faces. Make sure your API key is declared in Settings.
+                      Custom photos stay in this browser preview as temporary object URLs. This prototype does not upload them for face matching.
                     </p>
                   </div>
                 </div>

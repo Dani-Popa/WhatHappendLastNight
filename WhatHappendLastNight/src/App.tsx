@@ -44,6 +44,7 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [progress, setProgress] = useState<MatchProgress | null>(null);
   const [activeScanFeedback, setActiveScanFeedback] = useState<string>('Initializing matching core...');
+  const [isPrivacyAccepted, setIsPrivacyAccepted] = useState<boolean>(false);
 
   // Navigation Filter
   const [filterTab, setFilterTab] = useState<'matches' | 'unmatched' | 'all'>('matches');
@@ -59,8 +60,8 @@ export default function App() {
   } | null>(null);
 
   // Handle Selfie callback
-  const handleSelfieSelected = (base64: string | null, isDemo: boolean = false, demoId: string | null = null) => {
-    setSelfie(base64);
+  const handleSelfieSelected = (referenceImage: string | null, isDemo: boolean = false, demoId: string | null = null) => {
+    setSelfie(referenceImage);
     setIsSelfieDemo(isDemo);
     setSelfieDemoId(demoId);
     // Clear matches if selfie is changed to force fresh scan
@@ -72,6 +73,7 @@ export default function App() {
   const handleEventSelected = (event: DemoEvent | null) => {
     setSelectedEvent(event);
     if (event) {
+      customPhotos.forEach((photo) => URL.revokeObjectURL(photo.url));
       setCustomPhotos([]);
     }
     setMatches({});
@@ -95,14 +97,35 @@ export default function App() {
     setMatchStatus('idle');
   };
 
+  const handleClearSession = () => {
+    customPhotos.forEach((photo) => URL.revokeObjectURL(photo.url));
+    setSelfie(null);
+    setIsSelfieDemo(false);
+    setSelfieDemoId(null);
+    setSelectedEvent(null);
+    setCustomPhotos([]);
+    setMatches({});
+    setMatchStatus('idle');
+    setErrorMessage(null);
+    setProgress(null);
+    setSelectedPhotoForModal(null);
+    setIsPrivacyAccepted(false);
+  };
+
   const handleRunScan = async () => {
     if (!selfie) return;
 
+    if (!isPrivacyAccepted) {
+      setErrorMessage('Please confirm the privacy notice before running any face comparison.');
+      setMatchStatus('idle');
+      return;
+    }
+
     setErrorMessage(null);
-    setMatchStatus('matching');
 
     // Scenario A: Both are presets/demos, run interactive simulated scan
     if (isSelfieDemo && selectedEvent) {
+      setMatchStatus('matching');
       const feedbackPhrases = [
         'Caching reference face vectors...',
         'Analyzing hairstyle & bone structure...',
@@ -147,87 +170,17 @@ export default function App() {
       return;
     }
 
-    // Scenario B: Real custom images! Call the express backend endpoint
-    const candidatesToScan = customPhotos;
-    if (candidatesToScan.length === 0) {
-      setErrorMessage('Please select a custom folder / upload party photos, or select a Demo Preset combination to scan.');
+    if (customPhotos.length > 0) {
+      setErrorMessage('Custom photo face matching is disabled in the web prototype to avoid uploading personal images. Use the native macOS app for local-only custom matching.');
       setMatchStatus('idle');
+      setProgress(null);
       return;
     }
 
-    // Process custom photos in parallel batches of 3
-    const batchSize = 3;
-    const total = candidatesToScan.length;
-    setProgress({ total, processed: 0, currentBatch: 1 });
-
-    const resultsMap: Record<string, MatchResult> = {};
-    const feedbackMessages = [
-      'Locating facial keypoints...',
-      'Scaling custom pixels...',
-      'Deconstructing flash lighting factors...',
-      'Matching against selfie reference dimensions...',
-      'Formulating match confidence reports...',
-    ];
-
-    try {
-      for (let i = 0; i < total; i += batchSize) {
-        const batch = candidatesToScan.slice(i, i + batchSize);
-        const batchIndex = Math.floor(i / batchSize) + 1;
-        
-        setActiveScanFeedback(feedbackMessages[i % feedbackMessages.length] || 'Analyzing photos batch...');
-        setProgress((prev) => (prev ? { ...prev, currentBatch: batchIndex } : null));
-
-        // Format candidate payloads (sending original base64 tags)
-        const payloadCandidates = batch.map((p) => ({
-          id: p.id,
-          base64: p.base64,
-        }));
-
-        const response = await fetch('/api/match', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            selfie: selfie,
-            candidates: payloadCandidates,
-          }),
-        });
-
-        if (!response.ok) {
-          const errData = await response.json().catch(() => ({}));
-          throw new Error(errData.error || `Matching request failed with status code ${response.status}`);
-        }
-
-        const data = await response.json();
-
-        if (data.results && Array.isArray(data.results)) {
-          data.results.forEach((r: any) => {
-            resultsMap[r.photoId] = {
-              photoId: r.photoId,
-              isMatch: r.isMatch,
-              confidence: r.confidence,
-              explanation: r.explanation,
-            };
-          });
-        }
-
-        setProgress((prev) => {
-          if (!prev) return null;
-          return {
-            ...prev,
-            processed: Math.min(prev.processed + batch.length, total),
-          };
-        });
-      }
-
-      setMatches(resultsMap);
-      setMatchStatus('completed');
-      setFilterTab('matches');
-    } catch (err: any) {
-      console.error('Scan Fail:', err);
-      setErrorMessage(err.message || 'An unexpected error occurred during facial scanning.');
-      setMatchStatus('error');
+    if (customPhotos.length === 0) {
+      setErrorMessage('Please select a custom folder / upload party photos, or select a Demo Preset combination to scan.');
+      setMatchStatus('idle');
+      return;
     }
   };
 
@@ -317,7 +270,7 @@ export default function App() {
         </div>
         <div className="flex items-center gap-2 text-[10px] bg-[#0A0A0A] border border-[#222] px-3 py-1.5 rounded-lg text-[#888] font-mono uppercase tracking-wider">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-          <span>Local Core</span>
+          <span>No Upload Mode</span>
         </div>
       </header>
 
@@ -368,6 +321,27 @@ export default function App() {
                   </span>
                 </div>
               </div>
+
+              <div className="bg-[#050505] border border-[#222] rounded-xl p-3 mb-4 text-[10px] text-[#777] leading-relaxed">
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={isPrivacyAccepted}
+                    onChange={(event) => setIsPrivacyAccepted(event.target.checked)}
+                    className="mt-0.5 accent-[#D4AF37]"
+                  />
+                  <span>
+                    I understand this browser prototype keeps custom images in temporary browser memory and does not upload them for matching. Demo scans are simulated; real custom matching should use the offline native app.
+                  </span>
+                </label>
+                <button
+                  onClick={handleClearSession}
+                  className="mt-2 text-[9px] uppercase tracking-wider text-red-400 hover:text-red-300 transition-colors flex items-center gap-1"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Clear Browser Session
+                </button>
+              </div>
             </div>
 
             {/* ERROR CARD INSIDE WORKSPACE */}
@@ -375,7 +349,7 @@ export default function App() {
               <div className="p-3 bg-red-950/25 border border-red-500/25 rounded-xl mb-4 text-xs text-red-300 leading-relaxed flex items-start gap-2.5 animate-bounce">
                 <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 flex-shrink-0" />
                 <div>
-                  <p className="font-semibold text-red-200">API Key Missing or System Error</p>
+                  <p className="font-semibold text-red-200">Privacy Notice</p>
                   <p className="text-[11px] text-red-400/90 mt-0.5 whitespace-pre-wrap">{errorMessage}</p>
                 </div>
               </div>
@@ -406,10 +380,10 @@ export default function App() {
             {/* RUN BUTTON */}
             <button
               id="cta-scan-trigger"
-              disabled={!selfie || (customPhotos.length === 0 && !selectedEvent) || matchStatus === 'matching'}
+              disabled={!selfie || !isPrivacyAccepted || (customPhotos.length === 0 && !selectedEvent) || matchStatus === 'matching'}
               onClick={handleRunScan}
               className={`w-full py-3.5 px-4 rounded-xl font-bold tracking-widest text-[10px] uppercase transition-all duration-300 flex items-center justify-center gap-2 shadow-lg filter ${
-                !selfie || (customPhotos.length === 0 && !selectedEvent)
+                !selfie || !isPrivacyAccepted || (customPhotos.length === 0 && !selectedEvent)
                   ? 'bg-[#111] text-[#444] border border-[#222] border-dashed cursor-not-allowed shadow-none'
                   : matchStatus === 'matching'
                   ? 'bg-black text-[#D4AF37] border border-[#D4AF37]/40 cursor-not-allowed'
@@ -424,7 +398,7 @@ export default function App() {
               ) : (
                 <>
                   <Sparkles className="w-4 h-4 text-black animate-pulse" />
-                  Trigger Matching Scanner
+                  Trigger Demo Scanner
                 </>
               )}
             </button>
@@ -611,7 +585,7 @@ export default function App() {
                 <Maximize2 className="w-4 h-4 text-[#D4AF37] animate-pulse" />
                 Identity Match Verification Detail
               </h4>
-              <p className="text-[9px] text-[#555] mt-1.5 font-mono uppercase tracking-wider">Comparing biometric alignment coordinates against the locked face reference.</p>
+              <p className="text-[9px] text-[#555] mt-1.5 font-mono uppercase tracking-wider">Comparing demo alignment details against the selected reference.</p>
             </div>
 
             {/* Main Side-by-Side Area */}
@@ -654,8 +628,8 @@ export default function App() {
                   )}
                 </div>
                 <div className="bg-[#050505] border border-[#222] p-2.5 rounded text-[9px] text-[#555] font-mono leading-relaxed uppercase tracking-wider">
-                  <span className="text-[#888] font-bold block mb-1">BIOMETRIC SPECS:</span>
-                  <span>Face scale ratio lock: 480px squared. Reference locking index: COMPLETE. Ready for match filters.</span>
+                  <span className="text-[#888] font-bold block mb-1">REFERENCE DETAILS:</span>
+                  <span>Reference preview is held in browser memory for this session only.</span>
                 </div>
               </div>
 
@@ -740,7 +714,7 @@ export default function App() {
       <footer className="border-t border-[#222] bg-[#050505] py-6 px-8 flex flex-col sm:flex-row justify-between items-center gap-3 text-[9px] text-[#555] font-mono uppercase tracking-widest mt-12">
         <span className="text-center sm:text-left">© 2026 What Happened Last Night. All rights protected.</span>
         <span className="flex items-center gap-3">
-          <span>Multimodal AI Face Comparison engine</span>
+          <span>Offline-first face comparison prototype</span>
           <span className="w-1.5 h-1.5 rounded-full bg-[#D4AF37] opacity-60" />
           <span>No unsolicited databases or trackers</span>
         </span>

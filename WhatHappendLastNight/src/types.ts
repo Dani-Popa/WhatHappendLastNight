@@ -7,7 +7,6 @@ export interface CandidatePhoto {
   id: string;
   name: string;
   url: string; // Object URL for client-side rendering
-  base64?: string; // Base64 data for sending to the server
   size?: number;
 }
 

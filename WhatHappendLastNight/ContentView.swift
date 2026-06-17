@@ -15,6 +15,8 @@ struct ContentView: View {
     @State private var isSelfieHovered = false
     @State private var isFolderHovered = false
     @State private var isShowingCameraSheet = false
+    @State private var isShowingPrivacyNotice = false
+    @State private var hasAcceptedBiometricNotice = false
     
     // Aesthetic Palette constants (Gold & Charcoal Core)
     private let darkBackground = Color(NSColor(red: 0.02, green: 0.02, blue: 0.02, alpha: 1.0))
@@ -34,7 +36,7 @@ struct ContentView: View {
                         .italic()
                         .foregroundColor(textLight)
                     
-                    Text("LOCAL FACENET RECOGNITION SYSTEM / OFFLINE CORE V2")
+                    Text("LOCAL FACENET MATCHING / OFFLINE CORE V2")
                         .font(.system(.caption, design: .monospaced))
                         .foregroundColor(textMuted)
                         .kerning(1.5)
@@ -47,7 +49,7 @@ struct ContentView: View {
                     Circle()
                         .fill(Color.emerald)
                         .frame(width: 6, height: 6)
-                    Text("AIR-GAPPED CHIP")
+                    Text("OFFLINE LOCAL MODE")
                         .font(.system(size: 9, design: .monospaced))
                         .fontWeight(.bold)
                         .foregroundColor(textMuted)
@@ -111,7 +113,7 @@ struct ContentView: View {
                                         .font(.system(size: 10, weight: .bold))
                                         .foregroundColor(textLight.opacity(0.70))
                                     
-                                    Text("Accepts live captures or drag-and-drop")
+                                    Text("Selfie stays on this device until cleared")
                                         .font(.system(size: 8))
                                         .foregroundColor(textMuted)
                                 }
@@ -160,7 +162,7 @@ struct ContentView: View {
                                     .font(.system(size: 10, weight: .bold))
                                     .foregroundColor(textLight.opacity(0.70))
                                 
-                                Text(sourceFolderURL?.path ?? "Loads entire folders containing camera files")
+                                Text(sourceFolderURL?.path ?? "Reads only image files from a folder you select")
                                     .font(.system(size: 8, design: .monospaced))
                                     .foregroundColor(textMuted)
                                     .lineLimit(2)
@@ -219,6 +221,52 @@ struct ContentView: View {
                     .padding(12)
                     .background(richCard.opacity(0.6))
                     .cornerRadius(8)
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "lock.shield")
+                                .foregroundColor(goldAccent)
+                            Text("Privacy & Consent")
+                                .font(.system(size: 10, design: .monospaced))
+                                .fontWeight(.bold)
+                                .foregroundColor(textMuted)
+                        }
+
+                        Text("Face matching runs locally. Selfies, face embeddings, and selected photos are not written to disk by this app and are not sent over the network.")
+                            .font(.system(size: 9))
+                            .foregroundColor(textMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Toggle(isOn: $hasAcceptedBiometricNotice) {
+                            Text("I consent to local face matching for this session")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(textLight.opacity(0.85))
+                        }
+                        .toggleStyle(.checkbox)
+
+                        HStack(spacing: 8) {
+                            Button(action: { isShowingPrivacyNotice = true }) {
+                                Text("PRIVACY SUMMARY")
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .fontWeight(.bold)
+                                    .foregroundColor(goldAccent)
+                            }
+                            .buttonStyle(PlainButtonStyle())
+
+                            Spacer()
+
+                            Button(action: clearLocalData) {
+                                Text("CLEAR SESSION")
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .fontWeight(.bold)
+                                    .foregroundColor(.red)
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                        }
+                    }
+                    .padding(12)
+                    .background(richCard.opacity(0.6))
+                    .cornerRadius(8)
                     
                     Spacer()
                     
@@ -260,15 +308,15 @@ struct ContentView: View {
                                         .font(.system(size: 10, design: .monospaced))
                                         .fontWeight(.bold)
                                 }
-                                .foregroundColor(targetSelfie == nil || sourceFolderURL == nil ? textMuted : Color.black)
+                                .foregroundColor(targetSelfie == nil || sourceFolderURL == nil || !hasAcceptedBiometricNotice ? textMuted : Color.black)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 12)
-                                .background(targetSelfie == nil || sourceFolderURL == nil ? deepSlate : goldAccent)
+                                .background(targetSelfie == nil || sourceFolderURL == nil || !hasAcceptedBiometricNotice ? deepSlate : goldAccent)
                                 .cornerRadius(8)
-                                .shadow(color: targetSelfie != nil && sourceFolderURL != nil ? goldAccent.opacity(0.15) : Color.clear, radius: 8)
+                                .shadow(color: targetSelfie != nil && sourceFolderURL != nil && hasAcceptedBiometricNotice ? goldAccent.opacity(0.15) : Color.clear, radius: 8)
                             }
                             .buttonStyle(PlainButtonStyle())
-                            .disabled(targetSelfie == nil || sourceFolderURL == nil)
+                            .disabled(targetSelfie == nil || sourceFolderURL == nil || !hasAcceptedBiometricNotice)
                         }
                     }
                     .padding(16)
@@ -284,11 +332,11 @@ struct ContentView: View {
                     // Title info drawer
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("MATCHED CONTRABAND RESULT ALBUMS")
+                            Text("LOCAL MATCH RESULTS")
                                 .font(.system(size: 11, weight: .bold))
                                 .foregroundColor(textLight)
                             
-                            Text(matcher.matchedResults.isEmpty ? "OFFLINE PHOTO GRID STANDBY" : "BIOMETRIC IDENTITIES DISCOVERED: \(matcher.matchedResults.count) FRAMES")
+                            Text(matcher.matchedResults.isEmpty ? "OFFLINE PHOTO GRID STANDBY" : "POTENTIAL LOCAL MATCHES: \(matcher.matchedResults.count) FRAMES")
                                 .font(.system(size: 9, design: .monospaced))
                                 .foregroundColor(textMuted)
                         }
@@ -310,7 +358,7 @@ struct ContentView: View {
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundColor(textLight.opacity(0.6))
                             
-                            Text("Provide your target identity photo and select any location repository directory on your Mac to initiate local scanning loops.")
+                            Text("Provide a target selfie, choose a folder, and confirm consent to run local-only matching.")
                                 .font(.system(size: 10))
                                 .foregroundColor(textMuted)
                                 .multilineTextAlignment(.center)
@@ -339,7 +387,7 @@ struct ContentView: View {
             
             // MARK: Static elegant footer branding
             HStack {
-                Text("© 2026 What Happened Last Night. CONFIDENTIALITY MODE ACTIVE.")
+                Text("© 2026 What Happened Last Night. LOCAL PRIVACY MODE ACTIVE.")
                     .font(.system(size: 8, design: .monospaced))
                     .foregroundColor(textMuted)
                 
@@ -352,7 +400,7 @@ struct ContentView: View {
                     Circle()
                         .fill(goldAccent.opacity(0.5))
                         .frame(width: 4, height: 4)
-                    Text("NO NET TRACKERS")
+                    Text("NO NETWORK UPLOADS")
                         .font(.system(size: 8, design: .monospaced))
                         .foregroundColor(textMuted)
                 }
@@ -370,6 +418,9 @@ struct ContentView: View {
             } onBrowseFile: {
                 selectSelfieFile()
             }
+        }
+        .sheet(isPresented: $isShowingPrivacyNotice) {
+            PrivacyNoticeSheet(isPresented: $isShowingPrivacyNotice, hasAcceptedBiometricNotice: $hasAcceptedBiometricNotice)
         }
     }
     
@@ -406,6 +457,11 @@ struct ContentView: View {
     }
     
     private func runSelfieScan() {
+            guard hasAcceptedBiometricNotice else {
+                isShowingPrivacyNotice = true
+                return
+            }
+
             guard let selfie = self.targetSelfie,
                   let folder = self.sourceFolderURL else { return }
             
@@ -413,6 +469,15 @@ struct ContentView: View {
                 await matcher.scanPartyFolder(selfieImage: selfie, folderURL: folder, strictness: threshold)
             }
         }
+
+    private func clearLocalData() {
+        matcher.cancel()
+        matcher.clearResults()
+        targetSelfie = nil
+        targetSelfieURL = nil
+        sourceFolderURL = nil
+        hasAcceptedBiometricNotice = false
+    }
     
     // MARK: Drag and drop loaders
     
@@ -576,6 +641,72 @@ struct ResultCardView: View {
     }
 }
 
+struct PrivacyNoticeSheet: View {
+    @Binding var isPresented: Bool
+    @Binding var hasAcceptedBiometricNotice: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Image(systemName: "lock.shield")
+                    .font(.system(size: 22))
+                    .foregroundColor(Color(NSColor(red: 0.83, green: 0.69, blue: 0.22, alpha: 1.0)))
+                Text("Privacy Summary")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundColor(Color(NSColor(red: 0.88, green: 0.85, blue: 0.82, alpha: 1.0)))
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                PrivacyNoticeRow(title: "Purpose", message: "The app compares a selfie with faces found in image files you choose, only to show possible matches in this session.")
+                PrivacyNoticeRow(title: "Local Processing", message: "Face detection, crops, and FaceNet embeddings are processed on this device. The app has outgoing network access disabled.")
+                PrivacyNoticeRow(title: "Storage", message: "The app does not write selfies, selected photos, embeddings, or match results to its own storage. Clear Session removes in-memory state.")
+                PrivacyNoticeRow(title: "Control", message: "You can cancel scanning at any time and choose a different folder or selfie. Only user-selected files are read.")
+            }
+
+            Toggle(isOn: $hasAcceptedBiometricNotice) {
+                Text("I consent to local face matching for this session")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Color(NSColor(red: 0.88, green: 0.85, blue: 0.82, alpha: 1.0)))
+            }
+            .toggleStyle(.checkbox)
+
+            HStack {
+                Spacer()
+                Button("Close") {
+                    isPresented = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button("Accept and Continue") {
+                    hasAcceptedBiometricNotice = true
+                    isPresented = false
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
+        .background(Color(NSColor(red: 0.03, green: 0.03, blue: 0.03, alpha: 1.0)))
+    }
+}
+
+struct PrivacyNoticeRow: View {
+    let title: String
+    let message: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundColor(Color(NSColor(red: 0.83, green: 0.69, blue: 0.22, alpha: 1.0)))
+            Text(message)
+                .font(.system(size: 11))
+                .foregroundColor(Color(NSColor(red: 0.55, green: 0.55, blue: 0.55, alpha: 1.0)))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
 // Quick extension for NSImage scaling helper
 extension NSImage {
     func resized(to newSize: NSSize) -> NSImage {
@@ -619,9 +750,9 @@ struct CameraPreviewView: NSViewRepresentable {
 }
 
 class CameraDelegateHelper: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
-    var onFrame: ((CMSampleBuffer) -> Void)?
+    nonisolated(unsafe) var onFrame: ((CMSampleBuffer) -> Void)?
     
-    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+    nonisolated func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         onFrame?(sampleBuffer)
     }
 }
@@ -665,7 +796,9 @@ class CameraManager: ObservableObject {
             self.session.beginConfiguration()
             
             guard let videoDevice = AVCaptureDevice.default(for: .video) else {
+                #if DEBUG
                 print("No video device found")
+                #endif
                 self.session.commitConfiguration()
                 return
             }
@@ -688,7 +821,9 @@ class CameraManager: ObservableObject {
                     self.videoOutput.setSampleBufferDelegate(self.delegateHelper, queue: DispatchQueue(label: "sample.buffer.queue"))
                 }
             } catch {
+                #if DEBUG
                 print("Could not initialize camera input: \(error.localizedDescription)")
+                #endif
             }
             
             self.session.commitConfiguration()
@@ -776,6 +911,12 @@ struct CameraCaptureSheet: View {
                         .stroke(Color(white: 0.1), lineWidth: 1)
                 )
             }
+
+            Text("Camera frames are used only to create the in-memory selfie reference for local matching.")
+                .font(.system(size: 9))
+                .foregroundColor(Color(white: 0.45))
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 380)
             
             HStack(spacing: 16) {
                 Button(action: {
