@@ -11,7 +11,7 @@ struct ContentView: View {
     @State private var targetSelfie: NSImage? = nil
     @State private var targetSelfieURL: URL? = nil
     @State private var sourceFolderURL: URL? = nil
-    @State private var threshold: Double = 0.55
+    @State private var threshold: Double = 0.75
     @State private var isSelfieHovered = false
     @State private var isFolderHovered = false
     @State private var isShowingCameraSheet = false
@@ -34,7 +34,7 @@ struct ContentView: View {
                         .italic()
                         .foregroundColor(textLight)
                     
-                    Text("LOCAL BIOMETRIC RETRIEVAL SYSTEM / OFFLINE CORE V1")
+                    Text("LOCAL FACENET RECOGNITION SYSTEM / OFFLINE CORE V2")
                         .font(.system(.caption, design: .monospaced))
                         .foregroundColor(textMuted)
                         .kerning(1.5)
@@ -193,7 +193,7 @@ struct ContentView: View {
                     // Matcher Strictness Settings
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Text("STRICTNESS / STRICTEȚE")
+                            Text("FACENET STRICTNESS / STRICTEȚE")
                                 .font(.system(size: 9, design: .monospaced))
                                 .fontWeight(.bold)
                                 .foregroundColor(textMuted)
@@ -203,15 +203,15 @@ struct ContentView: View {
                                 .foregroundColor(goldAccent)
                         }
                         
-                        Slider(value: $threshold, in: 0.15...0.85)
+                        Slider(value: $threshold, in: 0.0...1.0)
                             .accentColor(goldAccent)
                         
                         HStack {
-                            Text("Lenient (Multe poze)")
+                            Text("Lenient (Mai multe rezultate)")
                                 .font(.system(size: 8))
                                 .foregroundColor(textMuted)
                             Spacer()
-                            Text("Strict (Doar identice)")
+                            Text("Strict (Mai puține false positives)")
                                 .font(.system(size: 8))
                                 .foregroundColor(textMuted)
                         }
@@ -346,7 +346,7 @@ struct ContentView: View {
                 Spacer()
                 
                 HStack(spacing: 12) {
-                    Text("APPLE NEURAL ENGINE INTUITIVE PIPELINE")
+                    Text("COREML FACENET EMBEDDING PIPELINE")
                         .font(.system(size: 8, design: .monospaced))
                         .foregroundColor(textMuted)
                     Circle()
@@ -410,7 +410,7 @@ struct ContentView: View {
                   let folder = self.sourceFolderURL else { return }
             
             Task {
-                await matcher.scanPartyFolder(selfieImage: selfie, folderURL: folder)
+                await matcher.scanPartyFolder(selfieImage: selfie, folderURL: folder, strictness: threshold)
             }
         }
     
