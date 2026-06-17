@@ -5,6 +5,8 @@ import Combine
 import CoreImage
 import CoreML
 import CoreVideo
+import ImageIO
+import Accelerate
 
 // Matches exactly what your custom grid layout reads.
 // The UI still only needs fileURL and faceCount, so the view can stay simple.
@@ -237,6 +239,11 @@ final class FaceEmbeddingModel {
     /// Converts BGRA pixels to standardized RGB values.
     /// For FaceNet/davidsandberg models this is normally fixed image standardization:
     /// (pixel - 127.5) / 128.0.
+    ///
+    /// This implementation writes directly into the MLMultiArray's backing buffer via
+    /// the raw `Float` pointer instead of going through NSNumber subscripts. The
+    /// previous subscript path called `MLMultiArray.subscript([NSNumber])` ~80,000
+    /// times per face (160×160×3) which dominated per-image cost.
     private func makeStandardizedRGBMultiArray(from buffer: CVPixelBuffer, shape: [Int]) throws -> MLMultiArray {
         let normalizedShape = shape.isEmpty ? [1, imageSize, imageSize, 3] : shape
         let array = try MLMultiArray(shape: normalizedShape.map { NSNumber(value: $0) }, dataType: .float32)
@@ -249,72 +256,79 @@ final class FaceEmbeddingModel {
         }
 
         let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
-        let pointer = baseAddress.assumingMemoryBound(to: UInt8.self)
+        let src = baseAddress.assumingMemoryBound(to: UInt8.self)
+        let dst = array.dataPointer.assumingMemoryBound(to: Float.self)
+        let strides = array.strides.map { $0.intValue }
+
+        // Resolve which dims of the model input correspond to height/width/channel.
+        // Works for NHWC, NCHW, HWC, CHW and HWC1 layouts.
+        let (yStride, xStride, cStride) = Self.spatialStrides(shape: normalizedShape, strides: strides)
+
+        // Fixed image standardization (FaceNet/davidsandberg): (px - 127.5) / 128.0
+        let scale: Float = 1.0 / 128.0
+        let bias: Float = -127.5 / 128.0
 
         for y in 0..<imageSize {
-            let row = pointer.advanced(by: y * bytesPerRow)
+            let row = src.advanced(by: y * bytesPerRow)
+            let yOffset = y * yStride
             for x in 0..<imageSize {
                 let pixel = row.advanced(by: x * 4)
-
                 // kCVPixelFormatType_32BGRA gives B, G, R, A in memory.
                 let b = Float(pixel[0])
                 let g = Float(pixel[1])
                 let r = Float(pixel[2])
-
-                setStandardizedChannelValue((r - 127.5) / 128.0, in: array, shape: normalizedShape, y: y, x: x, channel: 0)
-                setStandardizedChannelValue((g - 127.5) / 128.0, in: array, shape: normalizedShape, y: y, x: x, channel: 1)
-                setStandardizedChannelValue((b - 127.5) / 128.0, in: array, shape: normalizedShape, y: y, x: x, channel: 2)
+                let base = yOffset + x * xStride
+                dst[base + 0 * cStride] = r * scale + bias
+                dst[base + 1 * cStride] = g * scale + bias
+                dst[base + 2 * cStride] = b * scale + bias
             }
         }
 
         return array
     }
 
-    private func setStandardizedChannelValue(_ value: Float, in array: MLMultiArray, shape: [Int], y: Int, x: Int, channel: Int) {
-        let number = NSNumber(value: value)
-
-        func set(_ indices: [Int]) {
-            array[indices.map { NSNumber(value: $0) }] = number
+    /// Picks the (y, x, channel) strides out of a model input's shape/stride pair so
+    /// the standardization loop is layout-agnostic.
+    private static func spatialStrides(shape: [Int], strides: [Int]) -> (Int, Int, Int) {
+        guard shape.count == strides.count, shape.count >= 3 else {
+            // Sensible row-major fallback for the typical NHWC FaceNet input.
+            return (shape.count >= 2 ? shape[1] * 3 : 3, 3, 1)
         }
 
-        switch shape.count {
-        case 4:
-            if shape[0] == 1 && shape[3] == 3 {
-                // NHWC: [1, H, W, C]
-                set([0, y, x, channel])
-            } else if shape[0] == 1 && shape[1] == 3 {
-                // NCHW: [1, C, H, W]
-                set([0, channel, y, x])
-            } else if shape[3] == 1 && shape[2] == 3 {
-                // HWC batch-last: [H, W, C, 1]
-                set([y, x, channel, 0])
-            } else {
-                let flatIndex = ((y * imageSize + x) * 3) + channel
-                if flatIndex < array.count { array[flatIndex] = number }
-            }
-
-        case 3:
-            if shape[2] == 3 {
-                // HWC: [H, W, C]
-                set([y, x, channel])
-            } else if shape[0] == 3 {
-                // CHW: [C, H, W]
-                set([channel, y, x])
-            } else {
-                let flatIndex = ((y * imageSize + x) * 3) + channel
-                if flatIndex < array.count { array[flatIndex] = number }
-            }
-
-        default:
-            let flatIndex = ((y * imageSize + x) * 3) + channel
-            if flatIndex < array.count { array[flatIndex] = number }
+        // Channel axis = the dim that equals 3 (RGB). Fall back to the last axis.
+        var channelAxis = shape.firstIndex(of: 3) ?? (shape.count - 1)
+        // Guard against the (rare) ambiguous case where multiple dims equal 3.
+        if shape.filter({ $0 == 3 }).count > 1, shape.last == 3 {
+            channelAxis = shape.count - 1
         }
+
+        // H and W are the two remaining non-batch axes; assume row-major ordering
+        // (lower index = Y / height) which matches every common FaceNet conversion.
+        var spatial: [Int] = []
+        for i in 0..<shape.count where i != channelAxis && shape[i] != 1 {
+            spatial.append(i)
+        }
+        if spatial.count < 2 {
+            for i in 0..<shape.count where i != channelAxis && !spatial.contains(i) {
+                spatial.append(i)
+                if spatial.count >= 2 { break }
+            }
+        }
+        spatial.sort()
+
+        let yAxis = spatial[0]
+        let xAxis = spatial[1]
+        return (strides[yAxis], strides[xAxis], strides[channelAxis])
     }
 
     private func l2Normalized(_ vector: [Float]) -> [Float] {
-        let squaredSum = vector.reduce(Float(0)) { $0 + ($1 * $1) }
-        let norm = sqrt(max(squaredSum, 1e-12))
-        return vector.map { $0 / norm }
+        var result = vector
+        let count = vDSP_Length(result.count)
+        var sumOfSquares: Float = 0
+        vDSP_svesq(result, 1, &sumOfSquares, count)
+        var inverseNorm = 1.0 / sqrt(max(sumOfSquares, 1e-12))
+        vDSP_vsmul(result, 1, &inverseNorm, &result, 1, count)
+        return result
     }
 }
 
@@ -331,6 +345,16 @@ class FaceMatcher: ObservableObject {
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
     private let embeddingModel: FaceEmbeddingModel?
     private let modelLoadError: Error?
+
+    /// Max long-edge pixel size used when decoding a candidate photo for scanning.
+    /// FaceNet ultimately resizes the face crop to 160×160, so resolutions much
+    /// larger than this don't improve recognition quality but do massively slow
+    /// disk decode and Vision face detection — and starve the UI thread.
+    private let maxScanImageDimension: Int = 2400
+
+    /// Minimum time between main-actor UI publishes during a scan.
+    /// Smooth enough for the progress bar without flooding SwiftUI with re-renders.
+    private let uiPublishInterval: TimeInterval = 0.12
 
     init(modelNames: [String] = FaceEmbeddingModel.defaultModelNames) {
         do {
@@ -391,11 +415,22 @@ class FaceMatcher: ObservableObject {
     }
 
     /// Iterates through target local folder items and matches using FaceNet embeddings.
+    ///
+    /// Performance notes (vs. the original sequential implementation):
+    /// - Files are processed in parallel via a bounded TaskGroup so disk decode,
+    ///   Vision face detection and CoreML inference overlap.
+    /// - Each candidate image is decoded at a capped long-edge resolution through
+    ///   `ImageIO`. FaceNet only ever sees a 160×160 face crop, so the larger
+    ///   originals were burning CPU and memory without improving recognition.
+    /// - UI publishes (progress, status, matched results) are throttled to
+    ///   `uiPublishInterval` so SwiftUI is not re-rendered on every file.
     func scanPartyFolder(selfieImage: NSImage, folderURL: URL, strictness: Double) async {
         currentTask?.cancel()
 
         let minimumSimilarity = minimumCosineSimilarity(for: strictness)
-        let scanTask = Task {
+        let scanTask = Task { [weak self] in
+            guard let self = self else { return }
+
             await MainActor.run {
                 self.isScanning = true
                 self.progress = 0.0
@@ -433,75 +468,115 @@ class FaceMatcher: ObservableObject {
                 return
             }
 
-            let allowedExtensions = ["jpg", "jpeg", "png", "heic"]
+            let allowedExtensions: Set<String> = ["jpg", "jpeg", "png", "heic"]
             let imageFiles = fileURLs.filter { allowedExtensions.contains($0.pathExtension.lowercased()) }
             let totalCount = imageFiles.count
 
             if totalCount == 0 {
                 await MainActor.run {
                     self.isScanning = false
+                    self.hasScanned = true
                     self.statusText = "EMPTY TARGET DIRECTORY COMPLETED"
                 }
                 return
             }
 
-            var localMatches: [MatchResult] = []
+            await MainActor.run {
+                self.statusText = "SCANNING 0/\(totalCount)"
+            }
 
-            for (index, fileURL) in imageFiles.enumerated() {
-                if Task.isCancelled { return }
+            // Leave one core for the UI; ANE/CoreML rarely benefits past ~4 in-flight
+            // requests, so we cap accordingly to avoid memory spikes on large folders.
+            let concurrency = max(2, min(6, ProcessInfo.processInfo.activeProcessorCount - 1))
 
-                let currentProgress = Double(index + 1) / Double(totalCount)
-                let currentFileName = fileURL.lastPathComponent
+            var publishedMatches: [MatchResult] = []
+            var pendingMatches: [MatchResult] = []
+            var processed = 0
+            var lastPublish = Date(timeIntervalSince1970: 0)
 
-                await MainActor.run {
-                    self.progress = currentProgress
-                    self.statusText = "RECOGNIZING: \(currentFileName.uppERCased())"
+            await withTaskGroup(of: MatchResult?.self) { group in
+                var iterator = imageFiles.makeIterator()
+
+                @discardableResult
+                func enqueueNext() -> Bool {
+                    guard !Task.isCancelled, let url = iterator.next() else { return false }
+                    group.addTask { [weak self] in
+                        guard let self = self else { return nil }
+                        return await self.processFile(
+                            fileURL: url,
+                            targetEmbedding: targetEmbedding,
+                            embeddingModel: embeddingModel,
+                            minimumSimilarity: minimumSimilarity
+                        )
+                    }
+                    return true
                 }
 
-                guard let partyImage = NSImage(contentsOf: fileURL),
-                      let cgImage = partyImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-                    continue
+                for _ in 0..<concurrency {
+                    if !enqueueNext() { break }
                 }
 
-                do {
-                    let detectedFaces = try self.detectFaces(in: cgImage)
-                    let usableFaces = detectedFaces.filter { self.isUsableFace($0, in: cgImage) }
-                    let totalPeopleInPhoto = detectedFaces.count
-
-                    var bestSimilarity: Float = -1.0
-
-                    for face in usableFaces {
-                        guard let croppedFace = self.cropFace(from: cgImage, boundingBox: face.boundingBox) else {
-                            continue
-                        }
-
-                        let candidateEmbedding = try embeddingModel.embedding(from: croppedFace)
-                        let similarity = self.cosineSimilarity(candidateEmbedding, targetEmbedding)
-                        bestSimilarity = max(bestSimilarity, similarity)
+                while let result = await group.next() {
+                    if Task.isCancelled {
+                        group.cancelAll()
+                        break
                     }
 
-                    if bestSimilarity >= minimumSimilarity {
-                        localMatches.append(MatchResult(
-                            fileURL: fileURL,
-                            faceCount: totalPeopleInPhoto,
-                            similarity: Double(max(0, min(1, bestSimilarity)))
-                        ))
+                    processed += 1
+                    if let match = result {
+                        pendingMatches.append(match)
+                    }
+                    enqueueNext()
 
+                    let now = Date()
+                    let elapsed = now.timeIntervalSince(lastPublish)
+                    let isFinalTick = processed == totalCount
+                    if elapsed >= self.uiPublishInterval || isFinalTick {
+                        lastPublish = now
+
+                        var matchesSnapshot: [MatchResult]? = nil
+                        if !pendingMatches.isEmpty {
+                            publishedMatches.append(contentsOf: pendingMatches)
+                            pendingMatches.removeAll(keepingCapacity: true)
+                            publishedMatches.sort { $0.similarity > $1.similarity }
+                            matchesSnapshot = publishedMatches
+                        }
+
+                        let progressValue = Double(processed) / Double(totalCount)
+                        let statusSnapshot = "SCANNING \(processed)/\(totalCount)"
                         await MainActor.run {
-                            self.matchedResults = localMatches.sorted { $0.similarity > $1.similarity }
+                            self.progress = progressValue
+                            self.statusText = statusSnapshot
+                            if let snapshot = matchesSnapshot {
+                                self.matchedResults = snapshot
+                            }
                         }
                     }
-                } catch {
-                    #if DEBUG
-                    print("FaceNet recognition skipped one selected file: \(error.localizedDescription)")
-                    #endif
                 }
             }
 
+            let wasCancelled = Task.isCancelled
+            if !pendingMatches.isEmpty {
+                publishedMatches.append(contentsOf: pendingMatches)
+                publishedMatches.sort { $0.similarity > $1.similarity }
+            }
+            let finalMatches = publishedMatches
+            let totalFound = finalMatches.count
+
             await MainActor.run {
-                self.isScanning = false
-                self.hasScanned = true
-                self.statusText = localMatches.isEmpty ? "FACENET SCAN FINISHED: NO LOCAL RESULTS" : "FACENET SCAN COMPLETE: \(localMatches.count) TARGETS FOUND"
+                if wasCancelled {
+                    self.isScanning = false
+                    self.progress = 0.0
+                    self.matchedResults = finalMatches
+                    self.statusText = "SCAN CANCELED BY USER"
+                } else {
+                    self.matchedResults = finalMatches
+                    self.isScanning = false
+                    self.hasScanned = true
+                    self.statusText = totalFound == 0
+                        ? "FACENET SCAN FINISHED: NO LOCAL RESULTS"
+                        : "FACENET SCAN COMPLETE: \(totalFound) TARGETS FOUND"
+                }
             }
         }
 
@@ -509,9 +584,85 @@ class FaceMatcher: ObservableObject {
         await scanTask.value
     }
 
+    /// Per-file recognition pipeline. Safe to invoke from multiple concurrent tasks:
+    /// `CIContext`, `MLModel` and `VNImageRequestHandler` instances are all
+    /// thread-safe for concurrent reads.
+    private func processFile(
+        fileURL: URL,
+        targetEmbedding: [Float],
+        embeddingModel: FaceEmbeddingModel,
+        minimumSimilarity: Float
+    ) async -> MatchResult? {
+        if Task.isCancelled { return nil }
+
+        guard let cgImage = loadDownscaledCGImage(from: fileURL, maxPixelSize: maxScanImageDimension) else {
+            return nil
+        }
+
+        do {
+            let detectedFaces = try detectFaces(in: cgImage)
+            let totalPeopleInPhoto = detectedFaces.count
+            let usableFaces = detectedFaces.filter { isUsableFace($0, in: cgImage) }
+            if usableFaces.isEmpty { return nil }
+
+            var bestSimilarity: Float = -1.0
+            for face in usableFaces {
+                if Task.isCancelled { return nil }
+                guard let croppedFace = cropFace(from: cgImage, boundingBox: face.boundingBox) else {
+                    continue
+                }
+                let candidateEmbedding = try embeddingModel.embedding(from: croppedFace)
+                let similarity = cosineSimilarity(candidateEmbedding, targetEmbedding)
+                if similarity > bestSimilarity {
+                    bestSimilarity = similarity
+                }
+                // Already a near-perfect match — no value in embedding the rest of
+                // the faces in the same photo.
+                if bestSimilarity >= 0.985 { break }
+            }
+
+            if bestSimilarity >= minimumSimilarity {
+                return MatchResult(
+                    fileURL: fileURL,
+                    faceCount: totalPeopleInPhoto,
+                    similarity: Double(max(0, min(1, bestSimilarity)))
+                )
+            }
+        } catch {
+            #if DEBUG
+            print("FaceNet recognition skipped one selected file: \(error.localizedDescription)")
+            #endif
+        }
+        return nil
+    }
+
+    /// Decodes the file at `url` to a CGImage no larger than `maxPixelSize` on the
+    /// long edge, honoring EXIF orientation. Uses ImageIO's hardware-backed
+    /// thumbnail path so memory usage stays bounded even for DSLR-sized originals.
+    private func loadDownscaledCGImage(from url: URL, maxPixelSize: Int) -> CGImage? {
+        let sourceOptions: [CFString: Any] = [
+            kCGImageSourceShouldCache: false
+        ]
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary) else {
+            return nil
+        }
+        let thumbOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary)
+    }
+
     private func detectFaces(in cgImage: CGImage) throws -> [VNFaceObservation] {
         let requestHandler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        let request = VNDetectFaceLandmarksRequest()
+        // Rectangles-only is materially faster than landmarks and we never read
+        // landmark points; we only use confidence + boundingBox downstream.
+        let request = VNDetectFaceRectanglesRequest()
+        if #available(macOS 11.0, *) {
+            request.revision = VNDetectFaceRectanglesRequestRevision3
+        }
         try requestHandler.perform([request])
         return request.results ?? []
     }
@@ -546,15 +697,13 @@ class FaceMatcher: ObservableObject {
         let count = min(lhs.count, rhs.count)
         guard count > 0 else { return -1.0 }
 
+        let length = vDSP_Length(count)
         var dot: Float = 0
         var lhsNorm: Float = 0
         var rhsNorm: Float = 0
-
-        for index in 0..<count {
-            dot += lhs[index] * rhs[index]
-            lhsNorm += lhs[index] * lhs[index]
-            rhsNorm += rhs[index] * rhs[index]
-        }
+        vDSP_dotpr(lhs, 1, rhs, 1, &dot, length)
+        vDSP_svesq(lhs, 1, &lhsNorm, length)
+        vDSP_svesq(rhs, 1, &rhsNorm, length)
 
         let denominator = sqrt(max(lhsNorm, 1e-12)) * sqrt(max(rhsNorm, 1e-12))
         return dot / denominator
@@ -571,9 +720,3 @@ class FaceMatcher: ObservableObject {
     }
 }
 
-// Extension to cleanly transform file names in status updates
-private extension String {
-    func uppERCased() -> String {
-        return self.uppercased()
-    }
-}
