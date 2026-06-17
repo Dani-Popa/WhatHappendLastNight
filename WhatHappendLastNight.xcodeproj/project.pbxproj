@@ -6,8 +6,13 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		D95D8E622FEBD6F6003469F8 /* AdaFace.txt in Resources */ = {isa = PBXBuildFile; fileRef = D95D8E612FEBD6F6003469F8 /* AdaFace.txt */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		A46649C22FC99F5B00D992BC /* WhatHappendLastNight.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WhatHappendLastNight.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D95D8E612FEBD6F6003469F8 /* AdaFace.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = AdaFace.txt; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -37,6 +42,7 @@
 			children = (
 				A46649C42FC99F5B00D992BC /* WhatHappendLastNight */,
 				A46649C32FC99F5B00D992BC /* Products */,
+				D95D8E612FEBD6F6003469F8 /* AdaFace.txt */,
 			);
 			sourceTree = "<group>";
 		};
@@ -113,6 +119,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D95D8E622FEBD6F6003469F8 /* AdaFace.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
