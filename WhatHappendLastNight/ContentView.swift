@@ -10,7 +10,7 @@ import AVFoundation
 // — Calm, trust-signaling palette (navy + teal) with full light/dark parity.
 // — System fonts (SF Pro) at the type scale defined in §2.
 // — One primary CTA per screen; persistent identity strip; offline glyph in title.
-// — Two-panel comparison and a results grid that uses the ScoreChip (color + dots + word).
+// — Two-panel comparison and a results grid with per-tile color + score percentage.
 
 struct ContentView: View {
     @StateObject private var matcher = FaceMatcher()
@@ -346,35 +346,6 @@ private struct StageCard<Content: View>: View {
 }
 
 // MARK: - Header subviews
-
-/// Brand block — square accent icon + product name + subtitle.
-/// Sits at the top of the setup column, matches the visual rhythm of the
-/// reference design (large solid-colored tile + two-line wordmark).
-private struct BrandBlock: View {
-    var body: some View {
-        HStack(spacing: Space.s + 2) {
-            ZStack {
-                RoundedRectangle(cornerRadius: Radius.s + 2)
-                    .fill(Tokens.accentPrimary)
-                    .frame(width: 38, height: 38)
-                Image(systemName: "face.smiling.inverse")
-                    .font(.system(size: 22, weight: .regular))
-                    .foregroundColor(Tokens.onAccent)
-            }
-            VStack(alignment: .leading, spacing: 0) {
-                Text("Vault Identity")
-                    .font(Typography.h3)
-                    .foregroundColor(Tokens.accentPrimary)
-                Text("Local face matching")
-                    .font(Typography.caption)
-                    .foregroundColor(Tokens.textSecondary)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, Space.xs)
-        .padding(.bottom, Space.xs)
-    }
-}
 
 /// Compact circular icon button used in the header (theme toggle, help).
 private struct HeaderIconButton: View {

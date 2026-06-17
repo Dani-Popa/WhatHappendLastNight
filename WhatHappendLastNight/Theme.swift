@@ -138,11 +138,6 @@ enum Tokens {
         dark:  NSColor(srgbRed: 0.918, green: 0.702, blue: 0.031, alpha: 1.0)    // #EAB308 — lemon gold
     )
 
-    static let accentPrimaryHover = Color(
-        light: NSColor(srgbRed: 0.565, green: 0.251, blue: 0.020, alpha: 1.0),   // #904005 — darker amber
-        dark:  NSColor(srgbRed: 0.984, green: 0.800, blue: 0.220, alpha: 1.0)    // #FBCC38
-    )
-
     /// "Action" green — used for privacy accent, offline pill, score-high, checkmarks.
     static let accentSecondary = Color(
         light: NSColor(srgbRed: 0.082, green: 0.502, blue: 0.239, alpha: 1.0),   // #15803D — vibrant green (5.0:1 on white ✓ AA)
@@ -172,31 +167,13 @@ enum Tokens {
         light: NSColor(srgbRed: 0.604, green: 0.357, blue: 0.027, alpha: 1.0),   // #9A5B07
         dark:  NSColor(srgbRed: 0.949, green: 0.694, blue: 0.290, alpha: 1.0)    // #F2B14A
     )
-    static let scoreMediumBg = Color(
-        light: NSColor(srgbRed: 0.984, green: 0.945, blue: 0.875, alpha: 1.0),   // #FBF1DF
-        dark:  NSColor(srgbRed: 0.110, green: 0.082, blue: 0.039, alpha: 1.0)    // #1C150A
-    )
 
     static let scoreLow = Color(
         light: NSColor(srgbRed: 0.357, green: 0.392, blue: 0.439, alpha: 1.0),   // #5B6470
         dark:  NSColor(srgbRed: 0.541, green: 0.518, blue: 0.494, alpha: 1.0)    // #8A847E
     )
-    static let scoreLowBg = Color(
-        light: NSColor(srgbRed: 0.949, green: 0.949, blue: 0.969, alpha: 1.0),   // #F2F2F7
-        dark:  NSColor(srgbRed: 0.078, green: 0.078, blue: 0.078, alpha: 1.0)    // #141414
-    )
 
     // ---- Status -------------------------------------------------------
-
-    static let success = Color(
-        light: NSColor(srgbRed: 0.016, green: 0.463, blue: 0.298, alpha: 1.0),   // #04764C
-        dark:  NSColor(srgbRed: 0.353, green: 0.820, blue: 0.722, alpha: 1.0)    // #5AD1B8
-    )
-
-    static let warning = Color(
-        light: NSColor(srgbRed: 0.604, green: 0.357, blue: 0.027, alpha: 1.0),   // #9A5B07
-        dark:  NSColor(srgbRed: 0.949, green: 0.694, blue: 0.290, alpha: 1.0)    // #F2B14A
-    )
 
     static let error = Color(
         light: NSColor(srgbRed: 0.706, green: 0.137, blue: 0.094, alpha: 1.0),   // #B42318
@@ -208,12 +185,9 @@ enum Tokens {
 
 enum Typography {
     // Display & headings — SF Pro (system) handles Display/Text switchover automatically above 20pt.
-    static let display       = Font.system(size: 34, weight: .semibold)
-    static let h1            = Font.system(size: 26, weight: .semibold)
     static let h2            = Font.system(size: 20, weight: .semibold)
     static let h3            = Font.system(size: 17, weight: .semibold)
 
-    static let bodyLarge     = Font.system(size: 17, weight: .regular)
     static let body          = Font.system(size: 15, weight: .regular)
     static let bodyStrong    = Font.system(size: 15, weight: .semibold)
 
@@ -222,8 +196,6 @@ enum Typography {
 
     /// Tabular numerals — use for scores, sizes, timestamps so they don't jitter.
     static let scoreNumeral  = Font.system(size: 15, weight: .medium).monospacedDigit()
-    static let scoreNumeralL = Font.system(size: 22, weight: .medium).monospacedDigit()
-    static let mono          = Font.system(size: 12, weight: .regular, design: .monospaced)
 }
 
 // MARK: - Spacing & radius
@@ -234,15 +206,12 @@ enum Space {
     static let m:  CGFloat = 12
     static let l:  CGFloat = 16
     static let xl: CGFloat = 24
-    static let xxl: CGFloat = 32
-    static let xxxl: CGFloat = 48
 }
 
 enum Radius {
     static let s:  CGFloat = 6
     static let m:  CGFloat = 10
     static let l:  CGFloat = 14
-    static let xl: CGFloat = 20
 }
 
 // MARK: - Color helper (light/dark pair → dynamic NSColor)
@@ -287,73 +256,5 @@ enum ScoreTier {
         case .medium: return Tokens.scoreMedium
         case .low:    return Tokens.scoreLow
         }
-    }
-
-    var bgColor: Color {
-        switch self {
-        case .high:   return Tokens.scoreHighBg
-        case .medium: return Tokens.scoreMediumBg
-        case .low:    return Tokens.scoreLowBg
-        }
-    }
-}
-
-// MARK: - Score chip view
-
-/// Six-dot + percentage + word label score chip.
-/// Three redundant channels so colorblind / screen-reader users get the same info.
-struct ScoreChip: View {
-    let similarity: Double          // 0…1
-    var compact: Bool = false       // when true, drops the word label (grid tiles)
-
-    private var tier: ScoreTier { ScoreTier.from(similarity) }
-    private var percent: Int { Int((similarity * 100).rounded()) }
-    private var filled: Int { max(0, min(6, Int((similarity * 6).rounded()))) }
-
-    var body: some View {
-        HStack(spacing: Space.s) {
-            HStack(spacing: 3) {
-                ForEach(0..<6, id: \.self) { i in
-                    Circle()
-                        .fill(i < filled ? tier.color : tier.color.opacity(0.20))
-                        .frame(width: 6, height: 6)
-                }
-            }
-            Text("\(percent)%")
-                .font(Typography.scoreNumeral)
-                .foregroundColor(tier.color)
-            if !compact {
-                Text(tier.label)
-                    .font(Typography.label)
-                    .foregroundColor(tier.color)
-            }
-        }
-        .padding(.horizontal, Space.m)
-        .padding(.vertical, Space.s - 2)
-        .background(tier.bgColor)
-        .clipShape(Capsule())
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(tier.label), \(percent) percent similarity")
-    }
-}
-
-// MARK: - Focus-ring modifier
-
-struct FocusRingModifier: ViewModifier {
-    let isVisible: Bool
-    let radius: CGFloat
-
-    func body(content: Content) -> some View {
-        content.overlay(
-            RoundedRectangle(cornerRadius: radius)
-                .stroke(Tokens.accentPrimary, lineWidth: isVisible ? 2 : 0)
-                .padding(-2)
-        )
-    }
-}
-
-extension View {
-    func focusRing(_ visible: Bool, radius: CGFloat = Radius.m) -> some View {
-        modifier(FocusRingModifier(isVisible: visible, radius: radius))
     }
 }

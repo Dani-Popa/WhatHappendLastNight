@@ -13,9 +13,6 @@
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		A46649C42FC99F5B00D992BC /* WhatHappendLastNight */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			explicitFolders = (
-				src,
-			);
 			path = WhatHappendLastNight;
 			sourceTree = "<group>";
 		};
