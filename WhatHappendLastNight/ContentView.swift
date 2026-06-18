@@ -4,24 +4,14 @@ import AppKit
 import UniformTypeIdentifiers
 import AVFoundation
 
-// MARK: - Root view
-//
-// Implements the design system from DESIGN_GUIDE.md:
-// — Calm, trust-signaling palette (navy + teal) with full light/dark parity.
-// — System fonts (SF Pro) at the type scale defined in §2.
-// — One primary CTA per screen; persistent identity strip; offline glyph in title.
-// — Two-panel comparison and a results grid with per-tile color + score percentage.
-
 struct ContentView: View {
     @StateObject private var matcher = FaceMatcher()
     @EnvironmentObject var theme: ThemeManager
 
-    // ---- State -------------------------------------------------------------
-
     @State private var targetSelfie: NSImage? = nil
     @State private var targetSelfieURL: URL? = nil
     @State private var sourceFolderURL: URL? = nil
-    @State private var threshold: Double = 0.75
+    @State private var threshold: Double = 0.60
     @State private var isSelfieHovered = false
     @State private var isFolderHovered = false
     @State private var isShowingCameraSheet = false
@@ -29,8 +19,6 @@ struct ContentView: View {
     @State private var hasAcceptedBiometricNotice = false
     @State private var selectedResultID: MatchResult.ID? = nil
     @State private var lightboxIndex: Int? = nil
-
-    // ---- Layout ------------------------------------------------------------
 
     var body: some View {
         ZStack {
@@ -50,7 +38,6 @@ struct ContentView: View {
             .background(Tokens.bg)
             .foregroundColor(Tokens.textPrimary)
 
-            // Full-window lightbox — sits above every panel
             if lightboxIndex != nil {
                 LightboxView(
                     results: matcher.matchedResults,
@@ -78,11 +65,8 @@ struct ContentView: View {
         }
     }
 
-    // MARK: Header — title + persistent identity strip + offline glyph
-
     private var header: some View {
         HStack(spacing: Space.m) {
-            // ── Left: wordmark + subtitle ───────────────────────────────
             VStack(alignment: .leading, spacing: 2) {
                 Text("What Happened Last Night")
                     .font(.system(size: 18, weight: .semibold, design: .serif))
@@ -94,15 +78,9 @@ struct ContentView: View {
                     .foregroundColor(Tokens.textTertiary)
             }
 
-            // Offline badge — sits right of the wordmark
             OfflineBadge()
-
             Spacer()
 
-            // ── Right: identity strip + clear session ────────────────────
-            // The × inside IdentityStrip only removes the reference photo;
-            // full session wipe lives in the always-visible Clear Session
-            // button below.
             if let selfie = targetSelfie {
                 IdentityStrip(
                     image: selfie,
@@ -111,10 +89,6 @@ struct ContentView: View {
                 )
             }
 
-            // Always-available, clearly-labeled Clear Session button. Visible
-            // whenever there is anything to clear — including just granted
-            // consent without a selfie yet. This honors the GDPR Art. 7(3)
-            // "withdraw consent at any time" promise made in PRIVACY.md.
             if hasSessionState {
                 ClearSessionButton(onClear: clearLocalData)
             }
@@ -130,14 +104,6 @@ struct ContentView: View {
         .background(Tokens.bg)
     }
 
-    // MARK: Left — setup panel (selfie · folder · threshold · run)
-    //
-    // Designed to fit at ~680pt window height without scrolling. Privacy lives
-    // *next to the action button*, not at the top — the user can pick the
-    // selfie and folder in any order, and consent is asked only once, right
-    // before scanning. If they hit Find Me without consenting, the full
-    // PrivacyNoticeSheet auto-opens (see runSelfieScan).
-
     private var setupPanel: some View {
         VStack(spacing: 0) {
             ScrollView(.vertical, showsIndicators: false) {
@@ -147,7 +113,6 @@ struct ContentView: View {
                         SelfieDropzone(
                             image: targetSelfie,
                             filename: targetSelfieURL?.lastPathComponent,
-                            bestMatch: matcher.matchedResults.first?.similarity,
                             isHovered: $isSelfieHovered,
                             onCapture: { isShowingCameraSheet = true },
                             onDrop: loadSelfieFromDrop
@@ -165,8 +130,6 @@ struct ContentView: View {
 
                     ThresholdCard(threshold: $threshold)
 
-                    // Privacy consent card scrolls with the content so it
-                    // stays close to the setup steps it relates to.
                     if !matcher.isScanning {
                         ConsentCard(
                             consented: $hasAcceptedBiometricNotice,
@@ -175,11 +138,9 @@ struct ContentView: View {
                     }
                 }
                 .padding(Space.l)
-                .frame(maxWidth: .infinity) // Constrain width so ScrollView doesn't bleed
+                .frame(maxWidth: .infinity)
             }
 
-            // Only the action button (and scan progress) is pinned so it is
-            // always reachable without scrolling.
             FindMeButton(
                 matcher: matcher,
                 consented: $hasAcceptedBiometricNotice,
@@ -195,8 +156,6 @@ struct ContentView: View {
         .frame(width: 340)
         .background(Tokens.surfaceSunken)
     }
-
-    // MARK: Right — results
 
     private var resultsPanel: some View {
         VStack(spacing: 0) {
@@ -223,8 +182,6 @@ struct ContentView: View {
         .background(Tokens.bg)
     }
 
-    // MARK: Footer
-
     private var footer: some View {
         HStack(spacing: Space.l) {
             HStack(spacing: Space.xs + 2) {
@@ -250,8 +207,6 @@ struct ContentView: View {
         .background(Tokens.bg)
     }
 
-    // MARK: Actions
-
     private func selectSelfieFile() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]
@@ -274,10 +229,6 @@ struct ContentView: View {
         }
     }
 
-    /// True whenever there is *any* in-memory session state the user might
-    /// want to clear: a selfie, a folder reference, results, or even just a
-    /// granted-but-not-yet-used consent. Drives visibility of the always-
-    /// available Clear Session button in the header.
     private var hasSessionState: Bool {
         targetSelfie != nil
             || sourceFolderURL != nil
@@ -287,9 +238,6 @@ struct ContentView: View {
     }
 
     private func runSelfieScan() {
-        // GDPR Art. 9(2)(a) gate: explicit biometric consent must be granted;
-        // otherwise re-open the full privacy notice so the user sees what they
-        // are agreeing to.
         guard hasAcceptedBiometricNotice else {
             isShowingPrivacyNotice = true
             return
@@ -301,9 +249,6 @@ struct ContentView: View {
     }
 
     private func clearLocalData() {
-        // Acts as the withdraw-consent + erase-all-in-memory-data control
-        // (GDPR Art. 7(3) and Art. 17). After Clear, consent must be re-granted
-        // before any further biometric processing can occur.
         matcher.cancel()
         matcher.clearResults()
         targetSelfie = nil
@@ -313,10 +258,6 @@ struct ContentView: View {
         selectedResultID = nil
     }
 
-    /// Scoped to the × inside the reference identity strip: only the
-    /// reference selfie (and its filename) are dropped. Folder, consent,
-    /// and existing match results are preserved — full session wipe lives
-    /// in the always-visible Clear Session header button.
     private func clearReferencePhoto() {
         targetSelfie = nil
         targetSelfieURL = nil
@@ -348,12 +289,6 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Reusable card chrome
-
-/// Production card — bordered surface with an eyebrow header row + content.
-/// The card owns the chrome (padding, background, border, radius), so child
-/// dropzones can focus purely on their interactive content. Matches the
-/// original v1 layout where each setup step sat in its own polished panel.
 private struct StageCard<Content: View>: View {
     let icon: String
     let eyebrow: String
@@ -383,9 +318,6 @@ private struct StageCard<Content: View>: View {
     }
 }
 
-// MARK: - Header subviews
-
-/// Compact circular icon button used in the header (theme toggle, help).
 private struct HeaderIconButton: View {
     let systemName: String
     let help: String
@@ -408,10 +340,6 @@ private struct HeaderIconButton: View {
     }
 }
 
-/// Always-visible "Clear Session" header button. Wipes all in-memory
-/// state (selfie, folder, embeddings, results) and withdraws consent.
-/// Surfaced as a labeled button rather than a tiny icon so users can
-/// find the withdraw-consent control easily (GDPR Art. 7(3)).
 private struct ClearSessionButton: View {
     let onClear: () -> Void
     @State private var isHovered = false
@@ -443,10 +371,6 @@ private struct ClearSessionButton: View {
     }
 }
 
-/// Single-button appearance picker visible in the header.
-/// Click cycles System → Light → Dark → System; the icon and tooltip update
-/// to reflect the current preference. The full View → Appearance menu still
-/// works for keyboard users (⌘⌥0/1/2).
 private struct ThemeToggleButton: View {
     @EnvironmentObject var theme: ThemeManager
     @State private var isHovered = false
@@ -529,7 +453,6 @@ private struct IdentityStrip: View {
                     .truncationMode(.middle)
                     .frame(maxWidth: 180, alignment: .leading)
             }
-            // ── X dismiss button ─────────────────────────────────────
             Button(action: onClear) {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .bold))
@@ -554,20 +477,13 @@ private struct IdentityStrip: View {
     }
 }
 
-// MARK: - Dropzones
-
 private struct SelfieDropzone: View {
     let image: NSImage?
     let filename: String?
-    /// Best similarity from the most recent scan, if any. Shown as a green
-    /// caption under the thumbnail — matches the "76%" label in the design.
-    var bestMatch: Double? = nil
     @Binding var isHovered: Bool
     let onCapture: () -> Void
     let onDrop: ([NSItemProvider]) -> Bool
 
-    /// Fixed preview size so the dropzone keeps an identical footprint whether
-    /// it is empty or holding a selfie — the box never resizes around the photo.
     private let boxHeight: CGFloat = 200
 
     var body: some View {
@@ -576,7 +492,6 @@ private struct SelfieDropzone: View {
                 Group {
                     if let image = image {
                         ZStack {
-                            // Subtle tinted background fills any letterbox gaps
                             RoundedRectangle(cornerRadius: Radius.m)
                                 .fill(Tokens.surfaceSunken)
                             Image(nsImage: image)
@@ -624,12 +539,7 @@ private struct SelfieDropzone: View {
             .help("Click to capture, or drag an image here")
             .animation(.easeOut(duration: 0.15), value: isHovered)
 
-            // Caption row sits OUTSIDE the dropzone, in the parent card chrome.
-            if let bestMatch = bestMatch {
-                Text("\(Int((bestMatch * 100).rounded()))%")
-                    .font(Typography.scoreNumeral)
-                    .foregroundColor(Tokens.accentSecondary)
-            } else if image != nil {
+            if image != nil {
                 Text(filename ?? "identity_preview.png")
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundColor(Tokens.accentPrimary)
@@ -695,8 +605,6 @@ private struct FolderDropzone: View {
     }
 }
 
-// MARK: - Threshold card
-
 private struct ThresholdCard: View {
     @Binding var threshold: Double
 
@@ -715,8 +623,6 @@ private struct ThresholdCard: View {
                     .font(Typography.scoreNumeral)
                     .foregroundColor(Tokens.accentPrimary)
             }
-            // Wrap the slider in a tinted pill so the white system thumb has
-            // enough contrast against the card in light mode.
             ZStack {
                 RoundedRectangle(cornerRadius: Radius.s)
                     .fill(Tokens.surfaceSunken)
@@ -747,8 +653,6 @@ private struct ThresholdCard: View {
         )
     }
 }
-
-// MARK: - Find Me button (pinned) + scan progress
 
 private struct FindMeButton: View {
     @ObservedObject var matcher: FaceMatcher
@@ -821,12 +725,8 @@ private struct FindMeButton: View {
     }
 }
 
-// MARK: - Consent card (visible privacy gate, sits right above Find Me)
-
 private struct ConsentCard: View {
     @Binding var consented: Bool
-    /// Opens the full privacy notice sheet. Surfaced both here (in-card button)
-    /// and from the `?` button in the header.
     let onDetails: () -> Void
 
     var body: some View {
@@ -888,8 +788,6 @@ private struct ConsentCard: View {
     }
 }
 
-// MARK: - Results header / empty / scanning
-
 private struct ResultsHeader: View {
     let count: Int
 
@@ -918,7 +816,6 @@ private struct ResultsHeader: View {
     }
 }
 
-/// Shown when a scan completed successfully but found zero matches above threshold.
 private struct NoMatchesState: View {
     var body: some View {
         VStack(spacing: Space.xl) {
@@ -966,12 +863,6 @@ private struct NoMatchesState: View {
     }
 }
 
-/// Empty state for the results panel.
-///
-/// Carries the informational feel of the original ("here's what to do next")
-/// but with a polished modern presentation: hero glyph + descriptive line +
-/// a three-step checklist that ticks off as the user completes prerequisites,
-/// so they always know exactly where they are in the flow.
 private struct ResultsEmptyState: View {
     let hasSelfie: Bool
     let hasFolder: Bool
@@ -991,8 +882,6 @@ private struct ResultsEmptyState: View {
 
     var body: some View {
         VStack(spacing: Space.xl) {
-            // Hero glyph — the magnifying-glass spec from the original empty
-            // state, with a soft accent halo for a more luminous feel.
             ZStack {
                 Circle()
                     .fill(Tokens.accentSecondary.opacity(0.10))
@@ -1018,8 +907,6 @@ private struct ResultsEmptyState: View {
                     .frame(maxWidth: 360)
             }
 
-            // Step checklist — gives the user an at-a-glance map of remaining
-            // setup work. Each row ticks green as the prerequisite is met.
             VStack(alignment: .leading, spacing: Space.s) {
                 EmptyStateStep(done: hasSelfie,  text: "Add a reference selfie")
                 EmptyStateStep(done: hasFolder,  text: "Choose a folder of photos")
@@ -1084,8 +971,6 @@ private struct ScanningPlaceholder: View {
     }
 }
 
-// MARK: - Results grid
-
 private struct ResultsGrid: View {
     let results: [MatchResult]
     @Binding var selectedID: MatchResult.ID?
@@ -1114,11 +999,8 @@ private struct ResultsGrid: View {
     }
 }
 
-// MARK: - Lightbox (full-window, carousel + pinch/scroll zoom)
-
 private struct LightboxView: View {
     let results: [MatchResult]
-    /// Binding to the current index; set to nil to dismiss.
     @Binding var currentIndex: Int?
 
     @State private var fullImage: NSImage? = nil
@@ -1137,15 +1019,12 @@ private struct LightboxView: View {
 
     var body: some View {
         ZStack {
-            // ── Scrim ────────────────────────────────────────────────────
             Color.black.opacity(0.88)
                 .ignoresSafeArea()
                 .onTapGesture { dismiss() }
 
             VStack(spacing: 0) {
-                // ── Toolbar ──────────────────────────────────────────────
                 HStack(spacing: Space.s) {
-                    // Score badge
                     HStack(spacing: 6) {
                         Circle().fill(tier.color).frame(width: 7, height: 7)
                         Text("\(pct)%")
@@ -1156,7 +1035,6 @@ private struct LightboxView: View {
                     .background(.ultraThinMaterial)
                     .clipShape(Capsule())
 
-                    // Index counter
                     if results.count > 1 {
                         Text("\(index + 1) / \(results.count)")
                             .font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -1199,7 +1077,6 @@ private struct LightboxView: View {
                 .padding(.vertical, Space.m)
                 .background(.ultraThinMaterial)
 
-                // ── Photo + side arrows ───────────────────────────────────
                 ZStack {
                     GeometryReader { geo in
                         let effectiveScale = zoomScale * magnifyDelta
@@ -1252,7 +1129,6 @@ private struct LightboxView: View {
                         }
                     }
 
-                    // ── Carousel arrows ───────────────────────────────────
                     HStack {
                         CarouselArrow(direction: .prev, enabled: hasPrev) { navigateTo(index - 1) }
                         Spacer()
@@ -1260,8 +1136,6 @@ private struct LightboxView: View {
                     }
                     .padding(.horizontal, Space.l)
                 }
-                // Clip the photo+arrows layer so scaleEffect can never
-                // overflow into the toolbar above or the screen edges.
                 .clipped()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -1274,8 +1148,6 @@ private struct LightboxView: View {
             if let m = eventMonitor { NSEvent.removeMonitor(m); eventMonitor = nil }
         }
     }
-
-    // ── Helpers ──────────────────────────────────────────────────────────────
 
     @ViewBuilder
     private func toolbarIcon(_ name: String) -> some View {
@@ -1307,9 +1179,9 @@ private struct LightboxView: View {
     private func startKeyMonitor() {
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             switch event.keyCode {
-            case 123: navigateTo(index - 1); return nil   // ← left arrow
-            case 124: navigateTo(index + 1); return nil   // → right arrow
-            case 53:  dismiss();             return nil   // Esc
+            case 123: navigateTo(index - 1); return nil
+            case 124: navigateTo(index + 1); return nil
+            case 53:  dismiss();             return nil
             default:  return event
             }
         }
@@ -1338,8 +1210,6 @@ private struct LightboxView: View {
     }
 }
 
-// ── Carousel arrow button ─────────────────────────────────────────────────
-
 private enum ArrowDirection { case prev, next }
 
 private struct CarouselArrow: View {
@@ -1366,7 +1236,6 @@ private struct CarouselArrow: View {
     }
 }
 
-// Scroll-wheel modifier for zoom support
 private struct ScrollWheelModifier: ViewModifier {
     let action: (CGPoint) -> Void
     func body(content: Content) -> some View {
@@ -1397,8 +1266,6 @@ extension View {
     }
 }
 
-// MARK: - Result tile
-
 private struct ResultTile: View {
     let result: MatchResult
     let isSelected: Bool
@@ -1427,9 +1294,7 @@ private struct ResultTile: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            // ── Photo area ──────────────────────────────────────────────
             ZStack(alignment: .topTrailing) {
-                // Background fill while loading
                 Rectangle()
                     .fill(Tokens.surfaceSunken)
 
@@ -1444,7 +1309,6 @@ private struct ResultTile: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
 
-                // Score badge — top-right corner
                 HStack(spacing: 4) {
                     Circle()
                         .fill(tier.color)
@@ -1462,7 +1326,6 @@ private struct ResultTile: View {
             .aspectRatio(4/3, contentMode: .fit)
             .clipped()
 
-            // ── Bottom overlay bar ──────────────────────────────────────
             HStack(spacing: Space.xs) {
                 Image(systemName: "photo")
                     .font(.system(size: 10, weight: .medium))
@@ -1473,7 +1336,6 @@ private struct ResultTile: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 0)
-                // People count badge
                 if result.faceCount > 1 {
                     HStack(spacing: 3) {
                         Image(systemName: "person.2.fill")
@@ -1531,8 +1393,6 @@ private struct ResultTile: View {
         NSWorkspace.shared.activateFileViewerSelecting([result.fileURL])
     }
 }
-
-// MARK: - Privacy sheet
 
 struct PrivacyNoticeSheet: View {
     @Binding var isPresented: Bool
@@ -1635,8 +1495,6 @@ struct PrivacyNoticeRow: View {
     }
 }
 
-// MARK: - NSImage helper
-
 extension NSImage {
     func resized(to newSize: NSSize) -> NSImage {
         let destRect = NSRect(origin: .zero, size: newSize)
@@ -1647,8 +1505,6 @@ extension NSImage {
         return newImage
     }
 }
-
-// MARK: - Camera capture sheet
 
 struct CameraPreviewView: NSViewRepresentable {
     let session: AVCaptureSession

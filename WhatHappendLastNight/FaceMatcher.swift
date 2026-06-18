@@ -8,14 +8,10 @@ import CoreVideo
 import ImageIO
 import Accelerate
 
-// Matches exactly what your custom grid layout reads.
-// The UI still only needs fileURL and faceCount, so the view can stay simple.
 struct MatchResult: Identifiable {
     let id = UUID()
     let fileURL: URL
     let faceCount: Int
-    /// Best face-embedding cosine similarity vs. the reference selfie, in 0…1.
-    /// Defaults to 1.0 so older call sites keep working until they pass a value.
     let similarity: Double
 
     init(fileURL: URL, faceCount: Int, similarity: Double = 1.0) {
@@ -60,12 +56,6 @@ private enum FaceMatcherError: LocalizedError {
     }
 }
 
-/// Runtime wrapper around a FaceNet-style CoreML embedding model.
-///
-/// This intentionally avoids relying on the generated Swift model class name because
-/// different conversions of the daduz11/davidsandberg FaceNet model may be named
-/// `FaceNet`, `facenet`, `model`, etc. The wrapper reads the model's first input and
-/// first output dynamically.
 final class FaceEmbeddingModel {
     static let defaultModelNames = [
         "FaceNet",
@@ -121,8 +111,6 @@ final class FaceEmbeddingModel {
             }
         }
 
-        // Last-resort fallback: if the app bundle has exactly one compiled model,
-        // use it. This helps when the converted model has an unexpected name.
         let bundledCompiledModels = Bundle.main.urls(forResourcesWithExtension: "mlmodelc", subdirectory: nil) ?? []
         if bundledCompiledModels.count == 1, let onlyModel = bundledCompiledModels.first {
             return onlyModel
@@ -141,7 +129,6 @@ final class FaceEmbeddingModel {
             return nil
         }
 
-        // Common FaceNet shapes: [1, 160, 160, 3], [1, 3, 160, 160], [160, 160, 3].
         if shape.contains(160) { return 160 }
         if shape.contains(112) { return 112 }
         if shape.contains(128) { return 128 }
@@ -236,14 +223,6 @@ final class FaceEmbeddingModel {
         return buffer
     }
 
-    /// Converts BGRA pixels to standardized RGB values.
-    /// For FaceNet/davidsandberg models this is normally fixed image standardization:
-    /// (pixel - 127.5) / 128.0.
-    ///
-    /// This implementation writes directly into the MLMultiArray's backing buffer via
-    /// the raw `Float` pointer instead of going through NSNumber subscripts. The
-    /// previous subscript path called `MLMultiArray.subscript([NSNumber])` ~80,000
-    /// times per face (160×160×3) which dominated per-image cost.
     private func makeStandardizedRGBMultiArray(from buffer: CVPixelBuffer, shape: [Int]) throws -> MLMultiArray {
         let normalizedShape = shape.isEmpty ? [1, imageSize, imageSize, 3] : shape
         let array = try MLMultiArray(shape: normalizedShape.map { NSNumber(value: $0) }, dataType: .float32)
@@ -260,11 +239,8 @@ final class FaceEmbeddingModel {
         let dst = array.dataPointer.assumingMemoryBound(to: Float.self)
         let strides = array.strides.map { $0.intValue }
 
-        // Resolve which dims of the model input correspond to height/width/channel.
-        // Works for NHWC, NCHW, HWC, CHW and HWC1 layouts.
         let (yStride, xStride, cStride) = Self.spatialStrides(shape: normalizedShape, strides: strides)
 
-        // Fixed image standardization (FaceNet/davidsandberg): (px - 127.5) / 128.0
         let scale: Float = 1.0 / 128.0
         let bias: Float = -127.5 / 128.0
 
@@ -273,7 +249,6 @@ final class FaceEmbeddingModel {
             let yOffset = y * yStride
             for x in 0..<imageSize {
                 let pixel = row.advanced(by: x * 4)
-                // kCVPixelFormatType_32BGRA gives B, G, R, A in memory.
                 let b = Float(pixel[0])
                 let g = Float(pixel[1])
                 let r = Float(pixel[2])
@@ -287,23 +262,16 @@ final class FaceEmbeddingModel {
         return array
     }
 
-    /// Picks the (y, x, channel) strides out of a model input's shape/stride pair so
-    /// the standardization loop is layout-agnostic.
     private static func spatialStrides(shape: [Int], strides: [Int]) -> (Int, Int, Int) {
         guard shape.count == strides.count, shape.count >= 3 else {
-            // Sensible row-major fallback for the typical NHWC FaceNet input.
             return (shape.count >= 2 ? shape[1] * 3 : 3, 3, 1)
         }
 
-        // Channel axis = the dim that equals 3 (RGB). Fall back to the last axis.
         var channelAxis = shape.firstIndex(of: 3) ?? (shape.count - 1)
-        // Guard against the (rare) ambiguous case where multiple dims equal 3.
         if shape.filter({ $0 == 3 }).count > 1, shape.last == 3 {
             channelAxis = shape.count - 1
         }
 
-        // H and W are the two remaining non-batch axes; assume row-major ordering
-        // (lower index = Y / height) which matches every common FaceNet conversion.
         var spatial: [Int] = []
         for i in 0..<shape.count where i != channelAxis && shape[i] != 1 {
             spatial.append(i)
@@ -333,12 +301,10 @@ final class FaceEmbeddingModel {
 }
 
 class FaceMatcher: ObservableObject {
-    // UI Binding State hooks matching your custom view layers exactly
     @Published var isScanning = false
     @Published var progress: Double = 0.0
     @Published var statusText = "STANDBY"
     @Published var matchedResults: [MatchResult] = []
-    /// True once at least one scan has fully completed (even if no matches were found).
     @Published var hasScanned = false
 
     private var currentTask: Task<Void, Never>? = nil
@@ -346,14 +312,7 @@ class FaceMatcher: ObservableObject {
     private let embeddingModel: FaceEmbeddingModel?
     private let modelLoadError: Error?
 
-    /// Max long-edge pixel size used when decoding a candidate photo for scanning.
-    /// FaceNet ultimately resizes the face crop to 160×160, so resolutions much
-    /// larger than this don't improve recognition quality but do massively slow
-    /// disk decode and Vision face detection — and starve the UI thread.
     private let maxScanImageDimension: Int = 2400
-
-    /// Minimum time between main-actor UI publishes during a scan.
-    /// Smooth enough for the progress bar without flooding SwiftUI with re-renders.
     private let uiPublishInterval: TimeInterval = 0.12
 
     init(modelNames: [String] = FaceEmbeddingModel.defaultModelNames) {
@@ -369,7 +328,6 @@ class FaceMatcher: ObservableObject {
         }
     }
 
-    /// Halts ongoing looping routines safely upon explicit UI trigger requests
     func cancel() {
         currentTask?.cancel()
         cleanupScanningState(finalStatus: "SCAN CANCELED BY USER")
@@ -394,7 +352,6 @@ class FaceMatcher: ObservableObject {
         }
     }
 
-    /// Extracts the FaceNet embedding for the most prominent face in the identity selfie.
     private func extractTargetFaceEmbedding(from nsImage: NSImage, using model: FaceEmbeddingModel) throws -> [Float] {
         guard let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             throw FaceMatcherError.noFaceDetected
@@ -414,16 +371,6 @@ class FaceMatcher: ObservableObject {
         return try model.embedding(from: croppedFace)
     }
 
-    /// Iterates through target local folder items and matches using FaceNet embeddings.
-    ///
-    /// Performance notes (vs. the original sequential implementation):
-    /// - Files are processed in parallel via a bounded TaskGroup so disk decode,
-    ///   Vision face detection and CoreML inference overlap.
-    /// - Each candidate image is decoded at a capped long-edge resolution through
-    ///   `ImageIO`. FaceNet only ever sees a 160×160 face crop, so the larger
-    ///   originals were burning CPU and memory without improving recognition.
-    /// - UI publishes (progress, status, matched results) are throttled to
-    ///   `uiPublishInterval` so SwiftUI is not re-rendered on every file.
     func scanPartyFolder(selfieImage: NSImage, folderURL: URL, strictness: Double) async {
         currentTask?.cancel()
 
@@ -485,8 +432,6 @@ class FaceMatcher: ObservableObject {
                 self.statusText = "SCANNING 0/\(totalCount)"
             }
 
-            // Leave one core for the UI; ANE/CoreML rarely benefits past ~4 in-flight
-            // requests, so we cap accordingly to avoid memory spikes on large folders.
             let concurrency = max(2, min(6, ProcessInfo.processInfo.activeProcessorCount - 1))
 
             var publishedMatches: [MatchResult] = []
@@ -584,9 +529,6 @@ class FaceMatcher: ObservableObject {
         await scanTask.value
     }
 
-    /// Per-file recognition pipeline. Safe to invoke from multiple concurrent tasks:
-    /// `CIContext`, `MLModel` and `VNImageRequestHandler` instances are all
-    /// thread-safe for concurrent reads.
     private func processFile(
         fileURL: URL,
         targetEmbedding: [Float],
@@ -613,11 +555,14 @@ class FaceMatcher: ObservableObject {
                 }
                 let candidateEmbedding = try embeddingModel.embedding(from: croppedFace)
                 let similarity = cosineSimilarity(candidateEmbedding, targetEmbedding)
+                
+                #if DEBUG
+                print("Score: \(similarity) - File: \(fileURL.lastPathComponent)")
+                #endif
+                
                 if similarity > bestSimilarity {
                     bestSimilarity = similarity
                 }
-                // Already a near-perfect match — no value in embedding the rest of
-                // the faces in the same photo.
                 if bestSimilarity >= 0.985 { break }
             }
 
@@ -636,9 +581,6 @@ class FaceMatcher: ObservableObject {
         return nil
     }
 
-    /// Decodes the file at `url` to a CGImage no larger than `maxPixelSize` on the
-    /// long edge, honoring EXIF orientation. Uses ImageIO's hardware-backed
-    /// thumbnail path so memory usage stays bounded even for DSLR-sized originals.
     private func loadDownscaledCGImage(from url: URL, maxPixelSize: Int) -> CGImage? {
         let sourceOptions: [CFString: Any] = [
             kCGImageSourceShouldCache: false
@@ -657,8 +599,6 @@ class FaceMatcher: ObservableObject {
 
     private func detectFaces(in cgImage: CGImage) throws -> [VNFaceObservation] {
         let requestHandler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        // Rectangles-only is materially faster than landmarks and we never read
-        // landmark points; we only use confidence + boundingBox downstream.
         let request = VNDetectFaceRectanglesRequest()
         if #available(macOS 11.0, *) {
             request.revision = VNDetectFaceRectanglesRequestRevision3
@@ -677,20 +617,35 @@ class FaceMatcher: ObservableObject {
     }
 
     private func cropFace(from cgImage: CGImage, boundingBox: CGRect) -> CGImage? {
-        let imageRect = CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height)
-        var cropRect = VNImageRectForNormalizedRect(boundingBox, cgImage.width, cgImage.height)
+        let imageWidth = CGFloat(cgImage.width)
+        let imageHeight = CGFloat(cgImage.height)
+        let imageRect = CGRect(x: 0, y: 0, width: imageWidth, height: imageHeight)
 
-        // FaceNet benefits from a consistent face crop with a little context around chin/forehead.
-        let horizontalPadding = cropRect.width * 0.30
-        let verticalPadding = cropRect.height * 0.35
-        cropRect = cropRect.insetBy(dx: -horizontalPadding, dy: -verticalPadding)
-        cropRect = cropRect.intersection(imageRect).integral
+        let rawRect = VNImageRectForNormalizedRect(boundingBox, Int(imageWidth), Int(imageHeight))
+        let maxDimension = max(rawRect.width, rawRect.height)
 
-        guard cropRect.width >= 55, cropRect.height >= 55 else { return nil }
+        // Adjust vertical coordinate up slightly to capture the complete forehead area
+        let center = CGPoint(x: rawRect.midX, y: rawRect.midY + (rawRect.height * 0.12))
+        let paddedSize = maxDimension * 1.50
+
+        var squareRect = CGRect(
+            x: center.x - (paddedSize / 2),
+            y: center.y - (paddedSize / 2),
+            width: paddedSize,
+            height: paddedSize
+        ).integral
+
+        if squareRect.minX < 0 { squareRect.origin.x = 0 }
+        if squareRect.minY < 0 { squareRect.origin.y = 0 }
+        if squareRect.maxX > imageWidth { squareRect.origin.x = imageWidth - squareRect.width }
+        if squareRect.maxY > imageHeight { squareRect.origin.y = imageHeight - squareRect.height }
+
+        squareRect = squareRect.intersection(imageRect).integral
+        guard squareRect.width >= 55, squareRect.height >= 55 else { return nil }
 
         let ciImage = CIImage(cgImage: cgImage)
-        let croppedImage = ciImage.cropped(to: cropRect)
-        return ciContext.createCGImage(croppedImage, from: cropRect)
+        let croppedImage = ciImage.cropped(to: squareRect)
+        return ciContext.createCGImage(croppedImage, from: squareRect)
     }
 
     private func cosineSimilarity(_ lhs: [Float], _ rhs: [Float]) -> Float {
@@ -710,13 +665,7 @@ class FaceMatcher: ObservableObject {
     }
 
     private func minimumCosineSimilarity(for strictness: Double) -> Float {
-        let clampedStrictness = min(max(strictness, 0.0), 1.0)
-
-        // Tune these with your own photos. If false positives remain, raise both values.
-        let lenientSimilarity: Float = 0.55
-        let strictSimilarity: Float = 0.78
-
-        return lenientSimilarity + (Float(clampedStrictness) * (strictSimilarity - lenientSimilarity))
+        // Transparent mapping from the UI slider straight into the recognition thread
+        return Float(strictness)
     }
 }
-
