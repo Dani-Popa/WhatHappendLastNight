@@ -99,13 +99,24 @@ struct ContentView: View {
 
             Spacer()
 
-            // ── Right: identity strip + clear session (unchanged) ───────
+            // ── Right: identity strip + clear session ────────────────────
+            // The × inside IdentityStrip only removes the reference photo;
+            // full session wipe lives in the always-visible Clear Session
+            // button below.
             if let selfie = targetSelfie {
                 IdentityStrip(
                     image: selfie,
                     label: targetSelfieURL?.lastPathComponent ?? "Selfie captured",
-                    onClear: clearLocalData
+                    onClear: clearReferencePhoto
                 )
+            }
+
+            // Always-available, clearly-labeled Clear Session button. Visible
+            // whenever there is anything to clear — including just granted
+            // consent without a selfie yet. This honors the GDPR Art. 7(3)
+            // "withdraw consent at any time" promise made in PRIVACY.md.
+            if hasSessionState {
+                ClearSessionButton(onClear: clearLocalData)
             }
 
             ThemeToggleButton()
@@ -263,7 +274,22 @@ struct ContentView: View {
         }
     }
 
+    /// True whenever there is *any* in-memory session state the user might
+    /// want to clear: a selfie, a folder reference, results, or even just a
+    /// granted-but-not-yet-used consent. Drives visibility of the always-
+    /// available Clear Session button in the header.
+    private var hasSessionState: Bool {
+        targetSelfie != nil
+            || sourceFolderURL != nil
+            || hasAcceptedBiometricNotice
+            || !matcher.matchedResults.isEmpty
+            || matcher.isScanning
+    }
+
     private func runSelfieScan() {
+        // GDPR Art. 9(2)(a) gate: explicit biometric consent must be granted;
+        // otherwise re-open the full privacy notice so the user sees what they
+        // are agreeing to.
         guard hasAcceptedBiometricNotice else {
             isShowingPrivacyNotice = true
             return
@@ -275,6 +301,9 @@ struct ContentView: View {
     }
 
     private func clearLocalData() {
+        // Acts as the withdraw-consent + erase-all-in-memory-data control
+        // (GDPR Art. 7(3) and Art. 17). After Clear, consent must be re-granted
+        // before any further biometric processing can occur.
         matcher.cancel()
         matcher.clearResults()
         targetSelfie = nil
@@ -282,6 +311,15 @@ struct ContentView: View {
         sourceFolderURL = nil
         hasAcceptedBiometricNotice = false
         selectedResultID = nil
+    }
+
+    /// Scoped to the × inside the reference identity strip: only the
+    /// reference selfie (and its filename) are dropped. Folder, consent,
+    /// and existing match results are preserved — full session wipe lives
+    /// in the always-visible Clear Session header button.
+    private func clearReferencePhoto() {
+        targetSelfie = nil
+        targetSelfieURL = nil
     }
 
     private func loadSelfieFromDrop(_ providers: [NSItemProvider]) -> Bool {
@@ -367,6 +405,41 @@ private struct HeaderIconButton: View {
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
         .help(help)
+    }
+}
+
+/// Always-visible "Clear Session" header button. Wipes all in-memory
+/// state (selfie, folder, embeddings, results) and withdraws consent.
+/// Surfaced as a labeled button rather than a tiny icon so users can
+/// find the withdraw-consent control easily (GDPR Art. 7(3)).
+private struct ClearSessionButton: View {
+    let onClear: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: onClear) {
+            HStack(spacing: Space.xs + 2) {
+                Image(systemName: "trash")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("Clear Session")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .tracking(0.5)
+            }
+            .foregroundColor(isHovered ? Tokens.error : Tokens.textSecondary)
+            .padding(.horizontal, Space.s + 2)
+            .padding(.vertical, 6)
+            .background(isHovered ? Tokens.error.opacity(0.12) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: Radius.s))
+            .overlay(
+                RoundedRectangle(cornerRadius: Radius.s)
+                    .stroke(isHovered ? Tokens.error.opacity(0.5) : Tokens.border,
+                            lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help("Withdraw consent and erase all in-memory session data")
+        .accessibilityLabel("Clear session and withdraw biometric consent")
     }
 }
 
@@ -689,7 +762,7 @@ private struct FindMeButton: View {
     private var disabledReason: String {
         if !hasSelfie { return "Add a selfie first" }
         if !hasFolder { return "Pick a folder first" }
-        if !consented { return "Confirm the consent box first" }
+        if !consented { return "Give explicit consent to biometric processing first" }
         return ""
     }
 
@@ -762,19 +835,19 @@ private struct ConsentCard: View {
                 Image(systemName: "lock.shield")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(Tokens.accentSecondary)
-                Text("PRIVACY & CONSENT")
+                Text("PRIVACY & CONSENT · GDPR ART. 9")
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .tracking(0.6)
                     .foregroundColor(Tokens.accentSecondary)
             }
 
-            Text("Face matching runs locally. Embeddings and selected photos never leave this device.")
+            Text("Face matching produces biometric data — a special category under GDPR Article 9. Processing happens only on this device. Nothing is uploaded, logged, or written to disk. You can withdraw consent any time via Clear Session.")
                 .font(Typography.caption)
                 .foregroundColor(Tokens.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             Toggle(isOn: $consented) {
-                Text("I consent to local face matching for this session")
+                Text("I give explicit consent to on-device biometric processing for this session (GDPR Art. 9(2)(a)).")
                     .font(Typography.body)
                     .foregroundColor(Tokens.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1466,55 +1539,81 @@ struct PrivacyNoticeSheet: View {
     @Binding var hasAcceptedBiometricNotice: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Space.l) {
-            HStack(spacing: Space.s) {
-                Image(systemName: "lock.shield")
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundColor(Tokens.accentSecondary)
-                Text("Privacy Summary")
-                    .font(Typography.h2)
-                    .foregroundColor(Tokens.textPrimary)
-            }
-
-            VStack(alignment: .leading, spacing: Space.m) {
-                PrivacyNoticeRow(
-                    title: "Purpose",
-                    message: "The app compares a selfie with faces found in image files you choose, only to show possible matches in this session."
-                )
-                PrivacyNoticeRow(
-                    title: "Local processing",
-                    message: "Face detection, crops, and FaceNet embeddings run on this device. The app target has outgoing network access disabled."
-                )
-                PrivacyNoticeRow(
-                    title: "Storage",
-                    message: "The app does not write selfies, selected photos, embeddings, or match results to its own storage. Clear Session removes in-memory state."
-                )
-                PrivacyNoticeRow(
-                    title: "Control",
-                    message: "Cancel scanning at any time and choose a different folder or selfie. Only user-selected files are read."
-                )
-            }
-
-            Toggle(isOn: $hasAcceptedBiometricNotice) {
-                Text("I consent to local face matching for this session.")
-                    .font(Typography.body)
-                    .foregroundColor(Tokens.textPrimary)
-            }
-            .toggleStyle(.checkbox)
-
-            HStack {
-                Spacer()
-                Button("Close") { isPresented = false }
-                    .keyboardShortcut(.cancelAction)
-                Button("Accept and Continue") {
-                    hasAcceptedBiometricNotice = true
-                    isPresented = false
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: Space.l) {
+                HStack(spacing: Space.s) {
+                    Image(systemName: "lock.shield")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundColor(Tokens.accentSecondary)
+                    Text("Privacy Notice (GDPR)")
+                        .font(Typography.h2)
+                        .foregroundColor(Tokens.textPrimary)
                 }
-                .keyboardShortcut(.defaultAction)
+
+                VStack(alignment: .leading, spacing: Space.m) {
+                    PrivacyNoticeRow(
+                        title: "Controller",
+                        message: "The natural person running this app on their own Mac acts as the data controller for their own selfie and selected photos. The project author / distributor is not a controller because no data leaves the device. See PRIVACY.md for contact details."
+                    )
+                    PrivacyNoticeRow(
+                        title: "Purpose",
+                        message: "Compare a selfie you provide with faces found in image files you choose, only to show possible matches in this session."
+                    )
+                    PrivacyNoticeRow(
+                        title: "Lawful basis (Art. 9(2)(a))",
+                        message: "Processing of biometric data — a special category under GDPR Article 9 — is performed on the basis of your explicit, informed, freely given consent for this session only."
+                    )
+                    PrivacyNoticeRow(
+                        title: "Local processing",
+                        message: "Face detection, crops, and FaceNet embeddings run on this device using Apple Vision and CoreML. The app target has incoming and outgoing network access disabled at the macOS sandbox level."
+                    )
+                    PrivacyNoticeRow(
+                        title: "Storage and retention",
+                        message: "Selfies, source photos, biometric embeddings, similarity scores, and match results are held in memory only for the duration of the session. Nothing is written to app storage, UserDefaults, Keychain, or any database. Clear Session removes all in-memory state immediately."
+                    )
+                    PrivacyNoticeRow(
+                        title: "Your rights",
+                        message: "Because no personal data is stored or transmitted, requests for access, rectification, erasure, restriction, portability, and objection (Art. 15–21) are satisfied automatically: closing the app or pressing Clear Session erases everything. You can withdraw consent at any time without affecting the lawfulness of processing done before withdrawal (Art. 7(3))."
+                    )
+                    PrivacyNoticeRow(
+                        title: "Third parties",
+                        message: "No third-party SDKs, analytics, telemetry, tracking, advertising, or fonts are loaded. Apple Vision and CoreML run entirely on-device."
+                    )
+                    PrivacyNoticeRow(
+                        title: "Logging",
+                        message: "Debug logs do not include personal photo filenames, similarity scores, or embedding values. A generic message may note that one selected file was skipped without naming the file."
+                    )
+                }
+
+                Divider()
+
+                Toggle(isOn: $hasAcceptedBiometricNotice) {
+                    Text("I give explicit consent to on-device biometric processing for this session (GDPR Art. 9(2)(a)).")
+                        .font(Typography.body)
+                        .foregroundColor(Tokens.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .toggleStyle(.checkbox)
+
+                Text("You may withdraw consent at any time by pressing Clear Session in the header. Withdrawal stops further processing and clears all in-memory data.")
+                    .font(Typography.caption)
+                    .foregroundColor(Tokens.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Spacer()
+                    Button("Close") { isPresented = false }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Accept and Continue") {
+                        hasAcceptedBiometricNotice = true
+                        isPresented = false
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
             }
+            .padding(Space.xl)
         }
-        .padding(Space.xl)
-        .frame(width: 560)
+        .frame(width: 600, height: 620)
         .background(Tokens.surface)
     }
 }

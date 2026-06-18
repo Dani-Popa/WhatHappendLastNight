@@ -51,15 +51,20 @@ The justification string is already configured in the Xcode target (`INFOPLIST_K
 
 No other system permissions are requested. Folder access uses the standard macOS file picker, so no Full Disk Access entitlement is needed.
 
-## Privacy baseline
+## Privacy baseline (GDPR-aligned)
 
-- Native matching runs locally with Vision and CoreML.
-- The Xcode target disables incoming and outgoing network access.
+- Native matching runs locally with Apple Vision and CoreML.
+- The Xcode target disables incoming and outgoing network access at the macOS App Sandbox level.
 - Camera access is used only to capture a selfie reference for local matching.
-- Selfies, source photos, embeddings, and match results are **not** written to app storage.
-- Users must confirm the in-app privacy notice before matching and can clear session state with a single button.
+- Selfies, source photos, FaceNet embeddings, similarity scores, and match results are **never** written to disk, UserDefaults, Keychain, or any database. Everything lives in process memory and is cleared on Clear Session or quit.
+- Before any biometric processing starts the user must explicitly consent to on-device biometric processing under GDPR Art. 9(2)(a).
+- The **Find Me** button is disabled until consent is granted and a selfie + folder are picked.
+- **Clear Session** acts as the withdraw-consent + erase-in-memory control (GDPR Art. 7(3) and Art. 17).
+- No third-party SDKs, analytics, telemetry, advertising, fonts, or trackers are bundled.
+- Debug logs are scrubbed of personal photo filenames, similarity scores, and embedding values.
+- The Apple Privacy Manifest (`PrivacyInfo.xcprivacy`) declares: no tracking, no collected data types.
 
-See [PRIVACY.md](PRIVACY.md) before changing data flows, adding analytics, or adding any backend processing.
+See [PRIVACY.md](PRIVACY.md) for the full GDPR notice (controller, lawful basis, data-subject rights, DPIA summary). Re-read it before changing data flows, adding analytics, or adding any backend processing — any network egress invalidates the current notice and requires a fresh DPIA.
 See [DESIGN_GUIDE.md](DESIGN_GUIDE.md) for the visual system (palette, typography, spacing, accessibility targets).
 
 ## Project layout
