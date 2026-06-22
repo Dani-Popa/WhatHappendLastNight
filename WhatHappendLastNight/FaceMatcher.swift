@@ -609,10 +609,13 @@ class FaceMatcher: ObservableObject {
             }
 
             if bestSimilarity >= minimumSimilarity {
+                // Persist the user-facing confidence (remapped from cosine) so
+                // displayed match percentages line up with the slider's units —
+                // a 60% match means "passes a 60% strictness threshold."
                 return MatchResult(
                     fileURL: fileURL,
                     faceCount: totalPeopleInPhoto,
-                    similarity: Double(max(0, min(1, bestSimilarity)))
+                    similarity: Self.displayConfidence(from: bestSimilarity)
                 )
             }
         } catch {
@@ -650,10 +653,16 @@ class FaceMatcher: ObservableObject {
     }
 
     private func isUsableFace(_ face: VNFaceObservation, in cgImage: CGImage) -> Bool {
-        guard face.confidence >= 0.70 else { return false }
+        // Slightly looser confidence threshold — Vision rates partial-profile
+        // and side-lit faces lower, and we don't want to drop them before
+        // FaceNet even gets a look.
+        guard face.confidence >= 0.55 else { return false }
 
         let rect = VNImageRectForNormalizedRect(face.boundingBox, cgImage.width, cgImage.height)
-        guard rect.width >= 55, rect.height >= 55 else { return false }
+        // 36×36px minimum — below this FaceNet's 160×160 input upscale loses
+        // too much detail to be reliable, but anything larger should be
+        // given a chance even at the back of a group shot.
+        guard rect.width >= 36, rect.height >= 36 else { return false }
 
         return true
     }
@@ -706,8 +715,52 @@ class FaceMatcher: ObservableObject {
         return dot / denominator
     }
 
+    // MARK: - Confidence scaling
+    //
+    // FaceNet cosine similarity has a narrow useful band: roughly 0.55 is the
+    // noise floor where two *different* human faces tend to land, and 0.95+
+    // is the regime where you can be confident two crops are the same person.
+    // Showing the raw 0.0–1.0 value directly was misleading — a "62% match"
+    // displayed as a percentage feels meaningful, but in cosine space it's
+    // essentially "this is some human face." We remap that 0.55–0.95 band
+    // onto the user-facing 0–100% confidence scale so both the strictness
+    // slider and displayed match scores correspond to the user's intuition.
+
+    /// Lower bound of the useful FaceNet cosine band. Set below the typical
+    /// noise floor so the slider's loose end reaches real matches in tough
+    /// conditions (side angle, harsh lighting, user in back of a group),
+    /// whose genuine same-person scores can dip into 0.55–0.65.
+    static let cosineFloor: Float = 0.45
+    /// Upper bound — at or above this we treat the match as essentially certain.
+    /// Deliberately tight (0.80) so real same-person matches at cosine
+    /// 0.65–0.75 — the common range for varied real-world photos — land in
+    /// the 50–85% displayed range and feel like confident matches rather
+    /// than weak ones.
+    static let cosineCeiling: Float = 0.80
+
+    /// Maximum value the displayed confidence can reach. Capped below 100%
+    /// because face matching is never truly certain — claiming a perfect
+    /// match would overstate what the model actually knows.
+    static let displayCeiling: Double = 0.95
+
+    /// Maps a raw cosine similarity onto the user-facing confidence scale.
+    /// Floor maps to 0%, ceiling maps to `displayCeiling` (95%), and very
+    /// strong matches above the ceiling are clamped to that same 95% — we
+    /// never display 100%.
+    static func displayConfidence(from cosine: Float) -> Double {
+        let clamped = max(cosineFloor, min(cosineCeiling, cosine))
+        let normalized = Double((clamped - cosineFloor) / (cosineCeiling - cosineFloor))
+        return min(normalized, displayCeiling)
+    }
+
+    /// Inverse of `displayConfidence` — maps the slider position (0..1 in
+    /// confidence units) back to the raw cosine cutoff used for filtering.
+    static func cosineCutoff(forConfidence strictness: Double) -> Float {
+        let clamped = Float(max(0.0, min(1.0, strictness)))
+        return cosineFloor + clamped * (cosineCeiling - cosineFloor)
+    }
+
     private func minimumCosineSimilarity(for strictness: Double) -> Float {
-        // Transparent mapping from the UI slider straight into the recognition thread
-        return Float(strictness)
+        Self.cosineCutoff(forConfidence: strictness)
     }
 }

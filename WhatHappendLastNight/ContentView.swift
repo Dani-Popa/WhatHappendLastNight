@@ -3,6 +3,8 @@ import Combine
 import AppKit
 import UniformTypeIdentifiers
 import AVFoundation
+import Vision
+import CoreImage
 
 struct ContentView: View {
     @StateObject private var matcher = FaceMatcher()
@@ -12,7 +14,7 @@ struct ContentView: View {
     @State private var targetSelfie: NSImage? = nil
     @State private var targetSelfieURL: URL? = nil
     @State private var sourceFolderURL: URL? = nil
-    @State private var threshold: Double = 0.60
+    @State private var threshold: Double = 0.55
     @State private var isSelfieHovered = false
     @State private var isFolderHovered = false
     @State private var isShowingCameraSheet = false
@@ -225,7 +227,12 @@ struct ContentView: View {
     }
 
     /// Default strictness used when the reference photo changes.
-    private static let defaultThreshold: Double = 0.60
+    ///
+    /// 55% on the floor/ceiling mapping corresponds to cosine ~0.643 —
+    /// just above the midpoint, tilted slightly toward fewer false
+    /// positives while still catching strong matches. Users dial down
+    /// for tough folders or up to tighten further.
+    private static let defaultThreshold: Double = 0.55
 
     /// Sets a new reference photo and resets per-photo state: the privacy/consent
     /// acceptance is cleared and the strictness slider returns to its 60% default,
@@ -1033,8 +1040,8 @@ private struct ThresholdCard: View {
                     .frame(height: 30)
                 Slider(
                     value: $threshold,
-                    in: 0.30...0.95,
-                    minimumValueLabel: Text("30%")
+                    in: 0.05...0.95,
+                    minimumValueLabel: Text("5%")
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
                         .foregroundColor(Tokens.textTertiary),
                     maximumValueLabel: Text("95%")
@@ -2060,6 +2067,82 @@ class CameraManager: ObservableObject {
     }
 }
 
+/// Shared CIContext for camera-side image work. Reusing a single context
+/// across captures avoids the cost of recompiling the rendering graph.
+private let selfieCropContext = CIContext(options: [.useSoftwareRenderer: false])
+
+/// Crops a freshly-captured selfie to the dominant face with generous
+/// padding (so the result still looks like a selfie, not a tight headshot).
+///
+/// The on-screen oval guide is purely advisory — without this crop, the
+/// captured frame keeps every pixel of the camera's wide field of view,
+/// including everything behind the user. Falls back to the original image
+/// if no face passes the confidence/size threshold.
+private func cropSelfieToFace(_ image: NSImage) -> NSImage {
+    guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+        return image
+    }
+
+    let request = VNDetectFaceRectanglesRequest()
+    if #available(macOS 11.0, *) {
+        request.revision = VNDetectFaceRectanglesRequestRevision3
+    }
+    let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+    do {
+        try handler.perform([request])
+    } catch {
+        return image
+    }
+
+    // Pick the largest face with enough confidence — covers the case of
+    // bystanders being faintly visible behind the user.
+    guard let face = (request.results ?? [])
+        .filter({ $0.confidence >= 0.70 })
+        .max(by: { ($0.boundingBox.width * $0.boundingBox.height)
+                 < ($1.boundingBox.width * $1.boundingBox.height) })
+    else {
+        return image
+    }
+
+    let imageWidth = CGFloat(cgImage.width)
+    let imageHeight = CGFloat(cgImage.height)
+    let imageRect = CGRect(x: 0, y: 0, width: imageWidth, height: imageHeight)
+
+    let raw = VNImageRectForNormalizedRect(face.boundingBox, Int(imageWidth), Int(imageHeight))
+    let maxDim = max(raw.width, raw.height)
+
+    // Bias the crop upward so the forehead/hair stays in frame — Vision's
+    // face box stops at the eyebrows. Coordinates are bottom-left because
+    // we're working in CIImage/Vision space.
+    let center = CGPoint(x: raw.midX, y: raw.midY + raw.height * 0.18)
+    // 2.4× padding — generous enough that the captured selfie still works
+    // when the user didn't perfectly center inside the on-screen oval (a
+    // common case: a bit too close, off-center, or with hair extending
+    // beyond the face box). The matcher re-detects/re-crops the face from
+    // this selfie later, so extra surrounding area costs nothing.
+    let paddedSize = maxDim * 2.4
+
+    var rect = CGRect(
+        x: center.x - paddedSize / 2,
+        y: center.y - paddedSize / 2,
+        width: paddedSize,
+        height: paddedSize
+    ).integral
+
+    if rect.minX < 0 { rect.origin.x = 0 }
+    if rect.minY < 0 { rect.origin.y = 0 }
+    if rect.maxX > imageWidth { rect.origin.x = imageWidth - rect.width }
+    if rect.maxY > imageHeight { rect.origin.y = imageHeight - rect.height }
+    rect = rect.intersection(imageRect).integral
+
+    // Sanity: refuse to return a microscopic crop.
+    guard rect.width >= 120, rect.height >= 120 else { return image }
+
+    let ciImage = CIImage(cgImage: cgImage).cropped(to: rect)
+    guard let cropped = selfieCropContext.createCGImage(ciImage, from: rect) else { return image }
+    return NSImage(cgImage: cropped, size: NSSize(width: cropped.width, height: cropped.height))
+}
+
 struct CameraCaptureSheet: View {
     @StateObject private var cameraManager = CameraManager()
     @Binding var isPresented: Bool
@@ -2152,7 +2235,9 @@ struct CameraCaptureSheet: View {
                 Button {
                     if let image = cameraManager.currentImage {
                         cameraManager.stop()
-                        onCapture(image)
+                        // Crop to the detected face so the saved selfie matches
+                        // what the on-screen oval guide implied.
+                        onCapture(cropSelfieToFace(image))
                         isPresented = false
                     }
                 } label: {

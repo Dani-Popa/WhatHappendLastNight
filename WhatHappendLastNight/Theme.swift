@@ -236,9 +236,14 @@ enum ScoreTier {
     case medium
     case low
 
+    /// `similarity` is the user-facing confidence value (0..1) produced by
+    /// `FaceMatcher.displayConfidence`. On the current floor/ceiling
+    /// mapping (0.45–0.80 cosine), these thresholds correspond to roughly:
+    /// high ≥ cosine 0.70 (strong match), medium ≥ cosine 0.55 (plausible),
+    /// low otherwise.
     static func from(_ similarity: Double) -> ScoreTier {
-        if similarity >= 0.82 { return .high }
-        if similarity >= 0.55 { return .medium }
+        if similarity >= 0.70 { return .high }
+        if similarity >= 0.30 { return .medium }
         return .low
     }
 
