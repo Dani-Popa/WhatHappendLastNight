@@ -7,6 +7,7 @@ import CoreML
 import CoreVideo
 import ImageIO
 import Accelerate
+import CryptoKit
 
 struct MatchResult: Identifiable {
     let id = UUID()
@@ -371,6 +372,24 @@ class FaceMatcher: ObservableObject {
         return try model.embedding(from: croppedFace)
     }
 
+    /// A cheap content fingerprint used to detect duplicate copies of the same
+    /// photo across different subfolders. Combines the file size with a hash of
+    /// the first 256 KB, which uniquely separates distinct photos while reading
+    /// only a small slice of each file. Falls back to the full path if the file
+    /// can't be read, so unreadable files are never wrongly merged.
+    private static func contentSignature(for url: URL) -> String {
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return "path:\(url.path)"
+        }
+        defer { try? handle.close() }
+        let head = (try? handle.read(upToCount: 256 * 1024)) ?? Data()
+        var hasher = SHA256()
+        hasher.update(data: Data("\(size)|".utf8))
+        hasher.update(data: head)
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
     func scanPartyFolder(selfieImage: NSImage, folderURL: URL, strictness: Double) async {
         currentTask?.cancel()
 
@@ -407,7 +426,20 @@ class FaceMatcher: ObservableObject {
             let fileManager = FileManager.default
             let keys: [URLResourceKey] = [.isRegularFileKey]
 
-            guard let fileURLs = try? fileManager.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: keys, options: .skipsHiddenFiles) else {
+            // The selected folder is security-scoped under the macOS sandbox.
+            // Activate access so the deep enumerator can open descriptors inside
+            // subfolders (fresh panel URLs return false but are still usable).
+            let didStartAccess = folderURL.startAccessingSecurityScopedResource()
+            defer { if didStartAccess { folderURL.stopAccessingSecurityScopedResource() } }
+
+            // Recursively walk the selected folder and every subfolder. The error
+            // handler keeps the walk going if one subfolder can't be read.
+            guard let enumerator = fileManager.enumerator(
+                at: folderURL,
+                includingPropertiesForKeys: keys,
+                options: [.skipsHiddenFiles, .skipsPackageDescendants],
+                errorHandler: { _, _ in true }
+            ) else {
                 await MainActor.run {
                     self.isScanning = false
                     self.statusText = "ERROR: INVALID REPOSITORY TARGET LOCATION"
@@ -416,7 +448,17 @@ class FaceMatcher: ObservableObject {
             }
 
             let allowedExtensions: Set<String> = ["jpg", "jpeg", "png", "heic"]
-            let imageFiles = fileURLs.filter { allowedExtensions.contains($0.pathExtension.lowercased()) }
+            var imageFiles: [URL] = []
+            // De-duplicate identical photos that appear in more than one
+            // subfolder so the same image isn't listed multiple times.
+            var seenSignatures = Set<String>()
+            for case let url as URL in enumerator {
+                guard allowedExtensions.contains(url.pathExtension.lowercased()) else { continue }
+                let signature = Self.contentSignature(for: url)
+                if seenSignatures.insert(signature).inserted {
+                    imageFiles.append(url)
+                }
+            }
             let totalCount = imageFiles.count
 
             if totalCount == 0 {
