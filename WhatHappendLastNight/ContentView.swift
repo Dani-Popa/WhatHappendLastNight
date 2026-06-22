@@ -51,8 +51,7 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.20), value: theme.preference)
         .sheet(isPresented: $isShowingCameraSheet) {
             CameraCaptureSheet(isPresented: $isShowingCameraSheet) { capturedImage in
-                self.targetSelfie = capturedImage
-                self.targetSelfieURL = nil
+                self.setSelfie(capturedImage, url: nil)
             } onBrowseFile: {
                 selectSelfieFile()
             }
@@ -207,6 +206,24 @@ struct ContentView: View {
         .background(Tokens.bg)
     }
 
+    /// Default strictness used when the reference photo changes.
+    private static let defaultThreshold: Double = 0.60
+
+    /// Sets a new reference photo and resets per-photo state: the privacy/consent
+    /// acceptance is cleared and the strictness slider returns to its 60% default,
+    /// so each new photo requires fresh consent.
+    private func setSelfie(_ image: NSImage?, url: URL?) {
+        targetSelfie = image
+        targetSelfieURL = url
+        hasAcceptedBiometricNotice = false
+        threshold = Self.defaultThreshold
+        // A new reference photo invalidates the previous run's matches.
+        matcher.cancel()
+        matcher.clearResults()
+        selectedResultID = nil
+        lightboxIndex = nil
+    }
+
     private func selectSelfieFile() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]
@@ -214,8 +231,7 @@ struct ContentView: View {
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url, let image = NSImage(contentsOf: url) {
-            targetSelfie = image
-            targetSelfieURL = url
+            setSelfie(image, url: url)
         }
     }
 
@@ -270,8 +286,7 @@ struct ContentView: View {
                   let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
             DispatchQueue.main.async {
                 if let image = NSImage(contentsOf: url) {
-                    self.targetSelfie = image
-                    self.targetSelfieURL = url
+                    self.setSelfie(image, url: url)
                 }
             }
         }
@@ -976,11 +991,11 @@ private struct ResultsGrid: View {
     @Binding var selectedID: MatchResult.ID?
     @Binding var lightboxIndex: Int?
 
-    private let columns = [GridItem(.adaptive(minimum: 260, maximum: 360), spacing: Space.m)]
+    private let columns = [GridItem(.adaptive(minimum: 260, maximum: 360), spacing: Space.xl)]
 
     var body: some View {
         ScrollView {
-            LazyVGrid(columns: columns, spacing: Space.m) {
+            LazyVGrid(columns: columns, spacing: Space.xl) {
                 ForEach(Array(results.enumerated()), id: \.element.id) { index, r in
                     ResultTile(
                         result: r,
@@ -992,7 +1007,7 @@ private struct ResultsGrid: View {
                     }
                 }
             }
-            .padding(Space.l)
+            .padding(Space.xl)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Tokens.bg)
@@ -1297,17 +1312,18 @@ private struct ResultTile: View {
             ZStack(alignment: .topTrailing) {
                 Rectangle()
                     .fill(Tokens.surfaceSunken)
-
-                if let thumbnail {
-                    Image(nsImage: thumbnail)
-                        .resizable()
-                        .scaledToFill()
-                        .transition(.opacity.animation(.easeIn(duration: 0.25)))
-                } else {
-                    ProgressView()
-                        .scaleEffect(0.7)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+                    .overlay {
+                        if let thumbnail {
+                            Image(nsImage: thumbnail)
+                                .resizable()
+                                .scaledToFill()
+                                .transition(.opacity.animation(.easeIn(duration: 0.25)))
+                        } else {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                        }
+                    }
+                    .clipped()
 
                 HStack(spacing: 4) {
                     Circle()
@@ -1323,6 +1339,7 @@ private struct ResultTile: View {
                 .clipShape(Capsule())
                 .padding(10)
             }
+            .frame(maxWidth: .infinity)
             .aspectRatio(4/3, contentMode: .fit)
             .clipped()
 
@@ -1496,11 +1513,21 @@ struct PrivacyNoticeRow: View {
 }
 
 extension NSImage {
-    func resized(to newSize: NSSize) -> NSImage {
-        let destRect = NSRect(origin: .zero, size: newSize)
-        let newImage = NSImage(size: newSize)
+    /// Resizes while preserving the original aspect ratio. The result fits
+    /// inside `bounds` (no stretching/squashing). The card's `.scaledToFill()`
+    /// then crops it to the tile shape without distorting the photo.
+    func resized(to bounds: NSSize) -> NSImage {
+        let original = self.size
+        guard original.width > 0, original.height > 0 else { return self }
+
+        let scale = min(bounds.width / original.width, bounds.height / original.height)
+        let targetSize = NSSize(width: original.width * scale, height: original.height * scale)
+
+        let destRect = NSRect(origin: .zero, size: targetSize)
+        let newImage = NSImage(size: targetSize)
         newImage.lockFocus()
-        self.draw(in: destRect, from: NSRect(origin: .zero, size: self.size), operation: .copy, fraction: 1.0)
+        NSGraphicsContext.current?.imageInterpolation = .high
+        self.draw(in: destRect, from: NSRect(origin: .zero, size: original), operation: .copy, fraction: 1.0)
         newImage.unlockFocus()
         return newImage
     }
