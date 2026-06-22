@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	    App Sandbox + auto-generated entitlements from build settings
+	    (ENABLE_APP_SANDBOX, ENABLE_USER_SELECTED_FILES, ENABLE_RESOURCE_ACCESS_CAMERA,
+	    etc.) are still emitted by Xcode and merged with this file. The keys below
+	    are the ones the auto-generated settings do NOT cover.
+	-->
+
+	<!--
+	    Required so security-scoped bookmarks created from user-selected
+	    URLs (via NSOpenPanel) re-grant the same access after the app is
+	    restarted. Without this entitlement, bookmark resolution silently
+	    yields a URL whose `startAccessingSecurityScopedResource()` returns
+	    false, forcing the user to re-pick the folder every launch.
+	-->
+	<key>com.apple.security.files.bookmarks.app-scope</key>
+	<true/>
+</dict>
+</plist>

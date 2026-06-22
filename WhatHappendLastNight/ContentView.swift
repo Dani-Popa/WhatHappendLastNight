@@ -6,6 +6,7 @@ import AVFoundation
 
 struct ContentView: View {
     @StateObject private var matcher = FaceMatcher()
+    @StateObject private var savedFolders = SavedFoldersStore()
     @EnvironmentObject var theme: ThemeManager
 
     @State private var targetSelfie: NSImage? = nil
@@ -19,6 +20,12 @@ struct ContentView: View {
     @State private var hasAcceptedBiometricNotice = false
     @State private var selectedResultID: MatchResult.ID? = nil
     @State private var lightboxIndex: Int? = nil
+    @State private var isShowingSaveFolderSheet = false
+    @State private var saveFolderDraftName: String = ""
+    /// Tracks the URL whose security scope we currently hold open, so that
+    /// switching folders or clearing the session can release the old extension
+    /// before adopting a new one. Always equal to (or nil alongside) sourceFolderURL.
+    @State private var activeScopedURL: URL? = nil
 
     var body: some View {
         ZStack {
@@ -60,6 +67,14 @@ struct ContentView: View {
             PrivacyNoticeSheet(
                 isPresented: $isShowingPrivacyNotice,
                 hasAcceptedBiometricNotice: $hasAcceptedBiometricNotice
+            )
+        }
+        .sheet(isPresented: $isShowingSaveFolderSheet) {
+            SaveFolderSheet(
+                folderPath: sourceFolderURL?.path ?? "",
+                name: $saveFolderDraftName,
+                onCancel: { isShowingSaveFolderSheet = false },
+                onConfirm: commitSaveCurrentFolder
             )
         }
     }
@@ -123,7 +138,10 @@ struct ContentView: View {
                             folderURL: sourceFolderURL,
                             isHovered: $isFolderHovered,
                             onChoose: selectSourceFolder,
-                            onDrop: loadFolderFromDrop
+                            onDrop: loadFolderFromDrop,
+                            savedFolders: savedFolders,
+                            onPickSaved: pickSavedFolder,
+                            onSaveCurrent: beginSaveCurrentFolder
                         )
                     }
 
@@ -241,8 +259,85 @@ struct ContentView: View {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url {
-            sourceFolderURL = url
+            setSourceFolder(url)
         }
+    }
+
+    /// Sets the source folder from a previously-saved bookmark.
+    ///
+    /// Under the App Sandbox, just rebuilding a URL from the path string
+    /// after relaunch grants no access — we must resolve the security-scoped
+    /// bookmark we stored alongside it. The resolved URL already has its
+    /// access started; `setSourceFolder` takes ownership and balances stop.
+    ///
+    /// When the bookmark is missing (legacy shortcut from before bookmarks
+    /// were stored) or stale (folder moved / access revoked), we transparently
+    /// fall back to `NSOpenPanel` pre-pointed at the saved path so the user
+    /// can re-authorize with one click — and we refresh the stored bookmark
+    /// in place so the same shortcut works going forward.
+    private func pickSavedFolder(_ folder: SavedFolder) {
+        switch savedFolders.resolve(folder) {
+        case .ok(let url):
+            setSourceFolder(url, scopedAccessAlreadyStarted: true)
+
+        case .missingBookmark, .stale:
+            reauthorizeShortcut(folder)
+        }
+    }
+
+    /// Opens the system folder-picker pointed at a saved shortcut's path so
+    /// the user can re-grant sandbox access in a single confirm. On success
+    /// the bookmark is refreshed and the folder becomes the active source.
+    private func reauthorizeShortcut(_ folder: SavedFolder) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: folder.path, isDirectory: true)
+        panel.message = "Re-authorize \"\(folder.name)\" so it can be reused after restarts"
+        panel.prompt = "Authorize"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        // Re-save updates the existing entry's name + bookmark in place
+        // (matched by path), so the shortcut is now durable.
+        savedFolders.add(name: folder.name, url: url)
+        setSourceFolder(url)
+    }
+
+    /// Centralizes folder switching so both manual browse and shortcut picks
+    /// behave identically: stale scan results are wiped and any prior
+    /// security scope is released before we adopt the new URL.
+    ///
+    /// `scopedAccessAlreadyStarted` is true for bookmark-resolved URLs (the
+    /// store already called `startAccessingSecurityScopedResource()`);
+    /// `NSOpenPanel`/drop URLs don't need an explicit start so we don't
+    /// attempt one.
+    private func setSourceFolder(_ url: URL, scopedAccessAlreadyStarted: Bool = false) {
+        if let previous = activeScopedURL, previous != url {
+            previous.stopAccessingSecurityScopedResource()
+        }
+        activeScopedURL = scopedAccessAlreadyStarted ? url : nil
+        sourceFolderURL = url
+        matcher.cancel()
+        matcher.clearResults()
+    }
+
+    /// Opens the "save current folder" sheet, pre-filled with the folder's
+    /// own name as the default label.
+    private func beginSaveCurrentFolder() {
+        guard let url = sourceFolderURL else { return }
+        saveFolderDraftName = url.lastPathComponent
+        isShowingSaveFolderSheet = true
+    }
+
+    private func commitSaveCurrentFolder() {
+        guard let url = sourceFolderURL else {
+            isShowingSaveFolderSheet = false
+            return
+        }
+        savedFolders.add(name: saveFolderDraftName, url: url)
+        isShowingSaveFolderSheet = false
     }
 
     private var hasSessionState: Bool {
@@ -269,6 +364,11 @@ struct ContentView: View {
         matcher.clearResults()
         targetSelfie = nil
         targetSelfieURL = nil
+        // Release any held sandbox extension before dropping the URL.
+        if let scoped = activeScopedURL {
+            scoped.stopAccessingSecurityScopedResource()
+        }
+        activeScopedURL = nil
         sourceFolderURL = nil
         hasAcceptedBiometricNotice = false
         selectedResultID = nil
@@ -298,7 +398,7 @@ struct ContentView: View {
         provider.loadItem(forTypeIdentifier: UTType.directory.identifier, options: nil) { item, _ in
             guard let data = item as? Data,
                   let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
-            DispatchQueue.main.async { self.sourceFolderURL = url }
+            DispatchQueue.main.async { self.setSourceFolder(url) }
         }
         return true
     }
@@ -574,49 +674,338 @@ private struct FolderDropzone: View {
     @Binding var isHovered: Bool
     let onChoose: () -> Void
     let onDrop: ([NSItemProvider]) -> Bool
+    @ObservedObject var savedFolders: SavedFoldersStore
+    let onPickSaved: (SavedFolder) -> Void
+    let onSaveCurrent: () -> Void
+
+    private var currentSaved: SavedFolder? {
+        guard let url = folderURL else { return nil }
+        return savedFolders.entry(for: url)
+    }
+
+    private var hasSaved: Bool { !savedFolders.folders.isEmpty }
 
     var body: some View {
-        Button(action: onChoose) {
-            HStack(spacing: Space.m) {
-                Image(systemName: folderURL == nil ? "folder" : "folder.fill")
-                    .font(.system(size: 22, weight: .regular))
-                    .foregroundColor(folderURL == nil
-                                     ? (isHovered ? Tokens.accentPrimary : Tokens.textTertiary)
-                                     : Tokens.accentPrimary)
-                    .frame(width: 26)
+        VStack(alignment: .leading, spacing: Space.s) {
+            // Action row: appears only when there's something to act on
+            // (saved shortcuts to pick, or a folder to save).
+            if hasSaved || folderURL != nil {
+                FolderActionRow(
+                    savedFolders: savedFolders,
+                    currentURL: folderURL,
+                    currentIsSaved: currentSaved != nil,
+                    onPickSaved: onPickSaved,
+                    onSaveCurrent: onSaveCurrent
+                )
+            }
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(folderURL == nil ? "No folder selected" : "Folder selected")
+            // Main folder card — adapts between empty and filled states.
+            Button(action: onChoose) {
+                Group {
+                    if let url = folderURL {
+                        FolderCardSelected(
+                            url: url,
+                            savedName: currentSaved?.name,
+                            isHovered: isHovered
+                        )
+                    } else {
+                        FolderCardEmpty(isHovered: isHovered)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .onHover { isHovered = $0 }
+            .onDrop(of: [.directory], isTargeted: nil, perform: onDrop)
+            .help(folderURL == nil ? "Click to pick a folder, or drag one here" : "Click to choose a different folder")
+            .animation(.easeOut(duration: 0.18), value: isHovered)
+            .animation(.easeOut(duration: 0.18), value: folderURL)
+        }
+    }
+}
+
+/// Empty-state card — dashed border invites the user to drop or click.
+private struct FolderCardEmpty: View {
+    let isHovered: Bool
+
+    var body: some View {
+        HStack(spacing: Space.m) {
+            ZStack {
+                Circle()
+                    .fill(isHovered
+                          ? Tokens.accentPrimary.opacity(0.12)
+                          : Tokens.surfaceSunken.opacity(0.7))
+                    .frame(width: 38, height: 38)
+                Image(systemName: "folder.badge.plus")
+                    .font(.system(size: 17, weight: .regular))
+                    .foregroundColor(isHovered ? Tokens.accentPrimary : Tokens.textTertiary)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Choose a folder")
+                    .font(Typography.bodyStrong)
+                    .foregroundColor(Tokens.textPrimary)
+                Text("Click to browse, or drop a folder here")
+                    .font(Typography.caption)
+                    .foregroundColor(Tokens.textTertiary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Space.m)
+        .padding(.vertical, Space.m)
+        .background(Tokens.surfaceSunken.opacity(isHovered ? 0.45 : 0.30))
+        .clipShape(RoundedRectangle(cornerRadius: Radius.m))
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.m)
+                .stroke(
+                    isHovered ? Tokens.accentPrimary : Tokens.borderStrong.opacity(0.45),
+                    style: StrokeStyle(lineWidth: isHovered ? 1.5 : 1, dash: [4, 4])
+                )
+        )
+    }
+}
+
+/// Filled-state card — clean solid border, integrated bookmark badge when
+/// the current folder is a saved shortcut, single source of truth for the path.
+private struct FolderCardSelected: View {
+    let url: URL
+    let savedName: String?
+    let isHovered: Bool
+
+    private var displayTitle: String {
+        savedName ?? url.lastPathComponent
+    }
+
+    var body: some View {
+        HStack(spacing: Space.m) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(Tokens.accentPrimary.opacity(0.14))
+                    .frame(width: 38, height: 38)
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 17, weight: .regular))
+                    .foregroundColor(Tokens.accentPrimary)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    if savedName != nil {
+                        Image(systemName: "bookmark.fill")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(Tokens.accentPrimary)
+                    }
+                    Text(displayTitle)
                         .font(Typography.bodyStrong)
                         .foregroundColor(Tokens.textPrimary)
                         .lineLimit(1)
-                    Text(folderURL?.path ?? "Click to browse...")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(Tokens.textTertiary)
-                        .lineLimit(1)
                         .truncationMode(.middle)
                 }
-
-                Spacer(minLength: 0)
+                Text(url.path)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(Tokens.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
-            .padding(.horizontal, Space.m)
-            .padding(.vertical, Space.s + 2)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Tokens.surfaceSunken.opacity(0.5))
-            .clipShape(RoundedRectangle(cornerRadius: Radius.m))
+
+            Spacer(minLength: 0)
+
+            // Affordance: subtle "change" cue on hover.
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(isHovered ? Tokens.accentPrimary : Tokens.textTertiary.opacity(0.6))
+                .opacity(isHovered ? 1.0 : 0.7)
+        }
+        .padding(.horizontal, Space.m)
+        .padding(.vertical, Space.m)
+        .background(Tokens.surface)
+        .clipShape(RoundedRectangle(cornerRadius: Radius.m))
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.m)
+                .stroke(
+                    isHovered ? Tokens.accentPrimary.opacity(0.55) : Tokens.border,
+                    lineWidth: isHovered ? 1.25 : 1
+                )
+        )
+    }
+}
+
+/// Compact row above the folder card with two ghost-style actions:
+///   • Saved shortcuts menu — shown only when the user has any
+///   • Save-shortcut button — shown only when the current folder isn't saved
+private struct FolderActionRow: View {
+    @ObservedObject var savedFolders: SavedFoldersStore
+    let currentURL: URL?
+    let currentIsSaved: Bool
+    let onPickSaved: (SavedFolder) -> Void
+    let onSaveCurrent: () -> Void
+
+    @State private var renameTarget: SavedFolder? = nil
+    @State private var renameDraft: String = ""
+
+    var body: some View {
+        HStack(spacing: Space.xs + 2) {
+            if !savedFolders.folders.isEmpty {
+                savedFoldersMenu
+            }
+
+            Spacer(minLength: 0)
+
+            if currentURL != nil && !currentIsSaved {
+                saveShortcutButton
+            }
+        }
+        .frame(height: 24)
+        .sheet(item: $renameTarget) { folder in
+            RenameSavedFolderSheet(
+                originalName: folder.name,
+                draft: $renameDraft,
+                onCancel: { renameTarget = nil },
+                onConfirm: {
+                    savedFolders.rename(folder, to: renameDraft)
+                    renameTarget = nil
+                }
+            )
+        }
+    }
+
+    private var savedFoldersMenu: some View {
+        Menu {
+            Section("Use shortcut") {
+                ForEach(savedFolders.folders) { folder in
+                    Button {
+                        onPickSaved(folder)
+                    } label: {
+                        Label(folder.name, systemImage: "folder")
+                    }
+                }
+            }
+            Divider()
+            Section("Manage") {
+                ForEach(savedFolders.folders) { folder in
+                    Menu(folder.name) {
+                        Button("Rename…") {
+                            renameDraft = folder.name
+                            renameTarget = folder
+                        }
+                        Button("Remove", role: .destructive) {
+                            savedFolders.remove(folder)
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "bookmark")
+                    .font(.system(size: 10, weight: .semibold))
+                Text("Shortcuts")
+                    .font(.system(size: 12, weight: .medium))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .opacity(0.7)
+            }
+            .foregroundColor(Tokens.textSecondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                Capsule()
+                    .fill(Tokens.surfaceSunken.opacity(0.6))
+            )
             .overlay(
-                RoundedRectangle(cornerRadius: Radius.m)
-                    .stroke(
-                        isHovered ? Tokens.accentPrimary : Tokens.borderStrong.opacity(0.55),
-                        style: StrokeStyle(lineWidth: isHovered ? 1.5 : 1, dash: [5, 4])
-                    )
+                Capsule()
+                    .stroke(Tokens.border, lineWidth: 0.75)
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Use a saved folder shortcut")
+    }
+
+    private var saveShortcutButton: some View {
+        Button(action: onSaveCurrent) {
+            HStack(spacing: 5) {
+                Image(systemName: "bookmark")
+                    .font(.system(size: 10, weight: .semibold))
+                Text("Save shortcut")
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .foregroundColor(Tokens.accentPrimary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                Capsule()
+                    .fill(Tokens.accentPrimary.opacity(0.10))
             )
         }
         .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
-        .onDrop(of: [.directory], isTargeted: nil, perform: onDrop)
-        .help("Click to pick a folder, or drag one here")
-        .animation(.easeOut(duration: 0.15), value: isHovered)
+        .help("Save this folder for quick reuse")
+    }
+}
+
+/// Sheet shown when the user taps "Save" on the current folder. They give the
+/// bookmark a friendly name (defaulting to the folder's own name).
+private struct SaveFolderSheet: View {
+    let folderPath: String
+    @Binding var name: String
+    let onCancel: () -> Void
+    let onConfirm: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Space.m) {
+            Text("Save folder shortcut")
+                .font(Typography.bodyStrong)
+                .foregroundColor(Tokens.textPrimary)
+            Text(folderPath)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(Tokens.textTertiary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+            TextField("Display name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .frame(minWidth: 320)
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Save", action: onConfirm)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(Space.l)
+        .frame(minWidth: 360)
+    }
+}
+
+/// Small sheet for renaming a saved folder shortcut.
+private struct RenameSavedFolderSheet: View {
+    let originalName: String
+    @Binding var draft: String
+    let onCancel: () -> Void
+    let onConfirm: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Space.m) {
+            Text("Rename saved folder")
+                .font(Typography.bodyStrong)
+                .foregroundColor(Tokens.textPrimary)
+            Text("Was: \(originalName)")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(Tokens.textTertiary)
+            TextField("Folder name", text: $draft)
+                .textFieldStyle(.roundedBorder)
+                .frame(minWidth: 280)
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Save", action: onConfirm)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(Space.l)
+        .frame(minWidth: 320)
     }
 }
 
