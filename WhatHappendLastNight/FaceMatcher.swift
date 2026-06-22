@@ -14,11 +14,19 @@ struct MatchResult: Identifiable {
     let fileURL: URL
     let faceCount: Int
     let similarity: Double
+    /// Bounding box of the face that produced this match, in Vision's
+    /// normalized coordinate space (origin bottom-left, 0..1 on each axis).
+    /// `nil` when the result didn't come from the live scan (e.g. preview).
+    let faceBoundingBox: CGRect?
 
-    init(fileURL: URL, faceCount: Int, similarity: Double = 1.0) {
+    init(fileURL: URL,
+         faceCount: Int,
+         similarity: Double = 1.0,
+         faceBoundingBox: CGRect? = nil) {
         self.fileURL = fileURL
         self.faceCount = faceCount
         self.similarity = similarity
+        self.faceBoundingBox = faceBoundingBox
     }
 }
 
@@ -590,6 +598,7 @@ class FaceMatcher: ObservableObject {
             if usableFaces.isEmpty { return nil }
 
             var bestSimilarity: Float = -1.0
+            var bestFaceBox: CGRect? = nil
             for face in usableFaces {
                 if Task.isCancelled { return nil }
                 guard let croppedFace = cropFace(from: cgImage, boundingBox: face.boundingBox) else {
@@ -597,13 +606,17 @@ class FaceMatcher: ObservableObject {
                 }
                 let candidateEmbedding = try embeddingModel.embedding(from: croppedFace)
                 let similarity = cosineSimilarity(candidateEmbedding, targetEmbedding)
-                
+
                 #if DEBUG
                 print("Score: \(similarity) - File: \(fileURL.lastPathComponent)")
                 #endif
-                
+
                 if similarity > bestSimilarity {
                     bestSimilarity = similarity
+                    // Remember which face in the photo produced the best score —
+                    // the lightbox uses it to draw an overlay so the user knows
+                    // which person in a group shot was matched.
+                    bestFaceBox = face.boundingBox
                 }
                 if bestSimilarity >= 0.985 { break }
             }
@@ -615,7 +628,8 @@ class FaceMatcher: ObservableObject {
                 return MatchResult(
                     fileURL: fileURL,
                     faceCount: totalPeopleInPhoto,
-                    similarity: Self.displayConfidence(from: bestSimilarity)
+                    similarity: Self.displayConfidence(from: bestSimilarity),
+                    faceBoundingBox: bestFaceBox
                 )
             }
         } catch {

@@ -1431,8 +1431,30 @@ private struct LightboxView: View {
     @GestureState private var dragOffset: CGSize = .zero
     @GestureState private var magnifyDelta: CGFloat = 1.0
     @State private var eventMonitor: Any? = nil
+    /// Controls whether the face match overlay (ellipse around the matched
+    /// person) is drawn over the photo. Hidden by default so the photo is
+    /// shown unobstructed — user opts in via the toolbar toggle.
+    @State private var showFaceOverlay: Bool = false
+    /// Becomes true a runloop tick AFTER the image is loaded so the overlay
+    /// only mounts once SwiftUI has finished laying out the aspect-constrained
+    /// image. Prevents the ellipse from animating into position during the
+    /// brief layout settling phase.
+    @State private var overlayReady: Bool = false
+    /// Stable identity of the photo currently being viewed.
+    ///
+    /// The parent's `matcher.matchedResults` is re-sorted by similarity every
+    /// time new matches arrive during a scan, so `results[currentIndex]` can
+    /// silently swap to a different photo while the user is just looking. We
+    /// track by `MatchResult.id` instead so the lightbox stays locked to the
+    /// actual photo regardless of how the array reorders behind us.
+    @State private var viewingID: MatchResult.ID? = nil
 
-    private var index: Int { currentIndex ?? 0 }
+    private var index: Int {
+        if let id = viewingID, let i = results.firstIndex(where: { $0.id == id }) {
+            return i
+        }
+        return min(max(currentIndex ?? 0, 0), max(results.count - 1, 0))
+    }
     private var result: MatchResult { results[index] }
     private var tier: ScoreTier { ScoreTier.from(result.similarity) }
     private var pct: Int { Int((result.similarity * 100).rounded()) }
@@ -1472,6 +1494,16 @@ private struct LightboxView: View {
                     Spacer()
 
                     HStack(spacing: Space.s) {
+                        if result.faceBoundingBox != nil {
+                            Button {
+                                showFaceOverlay.toggle()
+                            } label: {
+                                toolbarIcon(showFaceOverlay ? "eye" : "eye.slash")
+                            }
+                            .buttonStyle(.plain)
+                            .help(showFaceOverlay ? "Hide face highlight" : "Show face highlight")
+                        }
+
                         Button { zoomOut() } label: { toolbarIcon("minus.magnifyingglass") }
                             .buttonStyle(.plain).help("Zoom out")
 
@@ -1509,35 +1541,52 @@ private struct LightboxView: View {
 
                         ZStack {
                             if let img = fullImage {
-                                Image(nsImage: img)
-                                    .resizable()
-                                    .scaledToFit()
-                                    .scaleEffect(effectiveScale)
-                                    .offset(effectiveOffset)
-                                    .gesture(
-                                        MagnifyGesture()
-                                            .updating($magnifyDelta) { val, state, _ in state = val.magnification }
-                                            .onEnded { val in
-                                                zoomScale = max(1.0, min(8.0, zoomScale * val.magnification))
-                                                clampOffset(in: geo.size)
-                                            }
-                                    )
-                                    .gesture(
-                                        DragGesture()
-                                            .updating($dragOffset) { val, state, _ in state = val.translation }
-                                            .onEnded { val in
-                                                offset = CGSize(
-                                                    width: offset.width + val.translation.width,
-                                                    height: offset.height + val.translation.height
-                                                )
-                                                clampOffset(in: geo.size)
-                                            }
-                                    )
-                                    .onScrollWheel { delta in
-                                        let factor = 1.0 - delta.y * 0.05
-                                        zoomScale = max(1.0, min(8.0, zoomScale * factor))
-                                        clampOffset(in: geo.size)
+                                // Wrap image + face overlay in a single
+                                // aspect-constrained ZStack so the ellipse
+                                // tracks zoom and pan together with the photo.
+                                ZStack(alignment: .topLeading) {
+                                    Image(nsImage: img)
+                                        .resizable()
+
+                                    if showFaceOverlay,
+                                       overlayReady,
+                                       let face = result.faceBoundingBox {
+                                        FaceMatchOverlay(
+                                            face: face,
+                                            containerSize: aspectFitSize(
+                                                for: img.size,
+                                                in: geo.size
+                                            )
+                                        )
                                     }
+                                }
+                                .aspectRatio(img.size, contentMode: .fit)
+                                .scaleEffect(effectiveScale)
+                                .offset(effectiveOffset)
+                                .gesture(
+                                    MagnifyGesture()
+                                        .updating($magnifyDelta) { val, state, _ in state = val.magnification }
+                                        .onEnded { val in
+                                            zoomScale = max(1.0, min(8.0, zoomScale * val.magnification))
+                                            clampOffset(in: geo.size)
+                                        }
+                                )
+                                .gesture(
+                                    DragGesture()
+                                        .updating($dragOffset) { val, state, _ in state = val.translation }
+                                        .onEnded { val in
+                                            offset = CGSize(
+                                                width: offset.width + val.translation.width,
+                                                height: offset.height + val.translation.height
+                                            )
+                                            clampOffset(in: geo.size)
+                                        }
+                                )
+                                .onScrollWheel { delta in
+                                    let factor = 1.0 - delta.y * 0.05
+                                    zoomScale = max(1.0, min(8.0, zoomScale * factor))
+                                    clampOffset(in: geo.size)
+                                }
                             } else {
                                 ProgressView().scaleEffect(1.2).tint(.white)
                             }
@@ -1563,6 +1612,14 @@ private struct LightboxView: View {
             }
         }
         .onAppear {
+            // Lock onto the photo's stable ID so re-sorts of the results
+            // array during ongoing scans can't silently swap us to a
+            // different photo. Without this, results[currentIndex] would
+            // start pointing to whatever newly-arrived high-similarity
+            // match displaced ours.
+            if viewingID == nil {
+                viewingID = result.id
+            }
             loadImage(for: result)
             startKeyMonitor()
         }
@@ -1584,7 +1641,11 @@ private struct LightboxView: View {
     private func navigateTo(_ newIndex: Int) {
         guard results.indices.contains(newIndex) else { return }
         resetZoom()
+        overlayReady = false
         fullImage = nil
+        // Track the new photo by its stable ID; the external currentIndex
+        // is kept in sync as a courtesy but isn't read back internally.
+        viewingID = results[newIndex].id
         currentIndex = newIndex
         loadImage(for: results[newIndex])
     }
@@ -1592,11 +1653,27 @@ private struct LightboxView: View {
     private func loadImage(for r: MatchResult) {
         DispatchQueue.global(qos: .userInitiated).async {
             let img = NSImage(contentsOf: r.fileURL)
-            DispatchQueue.main.async { fullImage = img }
+            DispatchQueue.main.async {
+                fullImage = img
+                // Defer overlay mount until SwiftUI has had a chance to lay
+                // out the aspect-constrained image — otherwise the ellipse's
+                // GeometryReader picks up transitional sizes and animates
+                // into its final position. One main-queue hop is enough.
+                DispatchQueue.main.async { overlayReady = true }
+            }
         }
     }
 
-    private func dismiss() { currentIndex = nil }
+    private func dismiss() {
+        // Intentionally do NOT clear viewingID here. The lightbox uses a
+        // fade-out transition, so the view stays rendered for ~200ms after
+        // currentIndex goes nil. If we cleared viewingID, the computed
+        // `result` property would fall back to results[0] during the fade —
+        // briefly showing the wrong face box. SwiftUI destroys this view's
+        // @State when the transition completes, so viewingID is cleaned up
+        // automatically; explicit clearing is both unnecessary and harmful.
+        currentIndex = nil
+    }
 
     private func startKeyMonitor() {
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
@@ -1629,6 +1706,58 @@ private struct LightboxView: View {
     }
     private func revealInFinder() {
         NSWorkspace.shared.activateFileViewerSelecting([result.fileURL])
+    }
+}
+
+/// Aspect-fit size of `content` inside `available` — the size the image
+/// actually occupies after `.aspectRatio(content, contentMode: .fit)`.
+/// Used to compute overlay coordinates without relying on a child
+/// GeometryReader (which can briefly report transitional sizes when the
+/// parent re-renders, making the overlay appear to "move").
+private func aspectFitSize(for content: CGSize, in available: CGSize) -> CGSize {
+    guard content.width > 0, content.height > 0,
+          available.width > 0, available.height > 0 else { return .zero }
+    let contentAspect = content.width / content.height
+    let availableAspect = available.width / available.height
+    if contentAspect > availableAspect {
+        // Letterboxed top/bottom — width fills, height is reduced.
+        return CGSize(width: available.width, height: available.width / contentAspect)
+    } else {
+        // Letterboxed left/right — height fills, width is reduced.
+        return CGSize(width: available.height * contentAspect, height: available.height)
+    }
+}
+
+/// Highlights the matched face inside the lightbox photo with a soft ellipse.
+///
+/// The bounding box arrives in Vision's normalized coordinate space (origin
+/// bottom-left, 0..1 on each axis), so we flip Y when placing in SwiftUI
+/// top-left layout. The container size is passed in (pre-computed in the
+/// outer GeometryReader) instead of read via an inner GeometryReader so the
+/// overlay's frame is a pure function of stable values — no re-layout pass
+/// can make the ellipse drift.
+private struct FaceMatchOverlay: View {
+    let face: CGRect
+    let containerSize: CGSize
+
+    var body: some View {
+        let w = face.width * containerSize.width
+        let h = face.height * containerSize.height
+        let x = face.minX * containerSize.width
+        let y = (1.0 - face.maxY) * containerSize.height
+
+        // Double-stroke for legibility against any background: a soft white
+        // halo behind the accent color so it reads on dark, light, or busy
+        // photos.
+        ZStack {
+            Ellipse()
+                .stroke(Color.white.opacity(0.55), lineWidth: 4)
+            Ellipse()
+                .stroke(Tokens.accentSecondary, lineWidth: 2)
+        }
+        .frame(width: w, height: h)
+        .offset(x: x, y: y)
+        .allowsHitTesting(false)
     }
 }
 
