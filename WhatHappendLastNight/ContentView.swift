@@ -642,9 +642,20 @@ private struct ThresholdCard: View {
                 RoundedRectangle(cornerRadius: Radius.s)
                     .fill(Tokens.surfaceSunken)
                     .frame(height: 30)
-                Slider(value: $threshold, in: 0.30...0.95)
-                    .tint(Tokens.accentPrimary)
-                    .padding(.horizontal, Space.s)
+                Slider(
+                    value: $threshold,
+                    in: 0.30...0.95,
+                    minimumValueLabel: Text("30%")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundColor(Tokens.textTertiary),
+                    maximumValueLabel: Text("95%")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundColor(Tokens.textTertiary)
+                ) {
+                    EmptyView()
+                }
+                .tint(Tokens.accentPrimary)
+                .padding(.horizontal, Space.s)
             }
             HStack {
                 Text("MORE RESULTS")
