@@ -315,6 +315,10 @@ class FaceMatcher: ObservableObject {
     @Published var statusText = "STANDBY"
     @Published var matchedResults: [MatchResult] = []
     @Published var hasScanned = false
+    /// Wall-clock time the most recent completed scan took, in seconds. `nil`
+    /// until a scan finishes (or after `clearResults`) so the UI can tell the
+    /// "never scanned" state apart from a real zero-duration measurement.
+    @Published var lastScanDuration: TimeInterval? = nil
 
     private var currentTask: Task<Void, Never>? = nil
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
@@ -350,6 +354,7 @@ class FaceMatcher: ObservableObject {
             self.statusText = "STANDBY"
             self.matchedResults.removeAll()
             self.hasScanned = false
+            self.lastScanDuration = nil
         }
     }
 
@@ -410,7 +415,14 @@ class FaceMatcher: ObservableObject {
                 self.progress = 0.0
                 self.statusText = "LOADING FACENET RECOGNITION CORE..."
                 self.matchedResults.removeAll()
+                // Reset any previous duration so the header doesn't display a
+                // stale "scanned in 12s" label while the new scan is in flight.
+                self.lastScanDuration = nil
             }
+
+            // Time the full scan — folder enumeration, embedding inference,
+            // and result aggregation — so the UI can show how long it took.
+            let scanStartTime = Date()
 
             guard let embeddingModel = self.embeddingModel else {
                 await MainActor.run {
@@ -557,6 +569,7 @@ class FaceMatcher: ObservableObject {
             }
             let finalMatches = publishedMatches
             let totalFound = finalMatches.count
+            let scanDuration = Date().timeIntervalSince(scanStartTime)
 
             await MainActor.run {
                 if wasCancelled {
@@ -564,10 +577,14 @@ class FaceMatcher: ObservableObject {
                     self.progress = 0.0
                     self.matchedResults = finalMatches
                     self.statusText = "SCAN CANCELED BY USER"
+                    // Cancelled runs don't get a duration label — the number
+                    // would be misleading since work stopped partway through.
+                    self.lastScanDuration = nil
                 } else {
                     self.matchedResults = finalMatches
                     self.isScanning = false
                     self.hasScanned = true
+                    self.lastScanDuration = scanDuration
                     self.statusText = totalFound == 0
                         ? "FACENET SCAN FINISHED: NO LOCAL RESULTS"
                         : "FACENET SCAN COMPLETE: \(totalFound) TARGETS FOUND"

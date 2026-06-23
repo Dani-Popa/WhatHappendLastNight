@@ -178,7 +178,10 @@ struct ContentView: View {
 
     private var resultsPanel: some View {
         VStack(spacing: 0) {
-            ResultsHeader(count: matcher.matchedResults.count)
+            ResultsHeader(
+                count: matcher.matchedResults.count,
+                scanDuration: matcher.lastScanDuration
+            )
             if matcher.isScanning && matcher.matchedResults.isEmpty {
                 ScanningPlaceholder(progress: matcher.progress, status: matcher.statusText)
             } else if matcher.hasScanned && matcher.matchedResults.isEmpty {
@@ -1212,6 +1215,10 @@ private struct ConsentCard: View {
 
 private struct ResultsHeader: View {
     let count: Int
+    /// Time the most recent completed scan took. `nil` before any scan has
+    /// finished — in that case the duration chip is hidden so the empty
+    /// "Ready when you are" state stays uncluttered.
+    let scanDuration: TimeInterval?
 
     var body: some View {
         HStack {
@@ -1228,6 +1235,18 @@ private struct ResultsHeader: View {
                          : "\(count) photo\(count == 1 ? "" : "s") above threshold")
                         .font(Typography.body)
                         .foregroundColor(Tokens.textSecondary)
+                    if count > 0, let duration = scanDuration {
+                        Text("·")
+                            .font(Typography.body)
+                            .foregroundColor(Tokens.textTertiary)
+                        HStack(spacing: 4) {
+                            Image(systemName: "clock")
+                                .font(.system(size: 11, weight: .medium))
+                            Text("scanned in \(Self.formatDuration(duration))")
+                                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        }
+                        .foregroundColor(Tokens.textTertiary)
+                    }
                 }
             }
             Spacer()
@@ -1235,6 +1254,22 @@ private struct ResultsHeader: View {
         .padding(.horizontal, Space.xl)
         .padding(.vertical, Space.l)
         .background(Tokens.bg)
+    }
+
+    /// Compact human-readable scan time. Sub-second runs get one decimal place
+    /// ("0.6s"), short runs stay in whole seconds ("12s"), and longer runs
+    /// switch to "Xm Ys" so the chip never grows past a few characters.
+    private static func formatDuration(_ duration: TimeInterval) -> String {
+        let total = max(0, duration)
+        if total < 1 {
+            return String(format: "%.1fs", total)
+        }
+        if total < 60 {
+            return "\(Int(total.rounded()))s"
+        }
+        let minutes = Int(total) / 60
+        let seconds = Int(total) % 60
+        return "\(minutes)m \(seconds)s"
     }
 }
 
