@@ -454,8 +454,8 @@ private struct HeaderIconButton: View {
             Image(systemName: systemName)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Tokens.textSecondary)
-                .frame(width: 28, height: 28)
-                .background(isHovered ? Tokens.surfaceElevated : Color.clear)
+                .frame(width: 32, height: 32)
+                .background(isHovered ? Tokens.surfaceElevated : Tokens.surface)
                 .clipShape(Circle())
                 .overlay(Circle().stroke(Tokens.border, lineWidth: 1))
         }
@@ -479,12 +479,12 @@ private struct ClearSessionButton: View {
                     .tracking(0.5)
             }
             .foregroundColor(isHovered ? Tokens.error : Tokens.textSecondary)
-            .padding(.horizontal, Space.s + 2)
-            .padding(.vertical, 6)
-            .background(isHovered ? Tokens.error.opacity(0.12) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: Radius.s))
+            .padding(.horizontal, Space.m)
+            .frame(height: 32)
+            .background(isHovered ? Tokens.error.opacity(0.12) : Tokens.surface)
+            .clipShape(RoundedRectangle(cornerRadius: Radius.m))
             .overlay(
-                RoundedRectangle(cornerRadius: Radius.s)
+                RoundedRectangle(cornerRadius: Radius.m)
                     .stroke(isHovered ? Tokens.error.opacity(0.5) : Tokens.border,
                             lineWidth: 1)
             )
@@ -515,11 +515,12 @@ private struct ThemeToggleButton: View {
             }
         } label: {
             Image(systemName: theme.preference.sfSymbol)
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Tokens.textSecondary)
-                .frame(width: 28, height: 28)
-                .background(isHovered ? Tokens.surfaceElevated : Color.clear)
+                .frame(width: 32, height: 32)
+                .background(isHovered ? Tokens.surfaceElevated : Tokens.surface)
                 .clipShape(Circle())
+                .overlay(Circle().stroke(Tokens.border, lineWidth: 1))
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
@@ -564,7 +565,7 @@ private struct IdentityStrip: View {
             Image(nsImage: image)
                 .resizable()
                 .scaledToFill()
-                .frame(width: 30, height: 30)
+                .frame(width: 24, height: 24)
                 .clipShape(RoundedRectangle(cornerRadius: Radius.s - 2))
             VStack(alignment: .leading, spacing: 1) {
                 Text("REFERENCE")
@@ -592,7 +593,7 @@ private struct IdentityStrip: View {
             .animation(.easeOut(duration: 0.12), value: isHovered)
         }
         .padding(.horizontal, Space.s + 2)
-        .padding(.vertical, 5)
+        .frame(height: 32)
         .background(Tokens.surface)
         .clipShape(RoundedRectangle(cornerRadius: Radius.m))
         .overlay(
