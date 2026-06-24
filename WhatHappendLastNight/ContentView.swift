@@ -56,6 +56,33 @@ struct ContentView: View {
                 .transition(.opacity.animation(.easeInOut(duration: 0.2)))
                 .zIndex(100)
             }
+
+            // Privacy notice + model info are rendered as in-window modal
+            // overlays (rather than `.sheet`) so a click on the dimmed
+            // backdrop dismisses them. macOS `.sheet` is modal and has no
+            // "outside" you can click — the overlay gives us that behavior
+            // while keeping the same visual content.
+            if isShowingPrivacyNotice {
+                DismissibleModal(isPresented: $isShowingPrivacyNotice) {
+                    PrivacyNoticeSheet(
+                        isPresented: $isShowingPrivacyNotice,
+                        hasAcceptedBiometricNotice: $hasAcceptedBiometricNotice
+                    )
+                }
+                .transition(.opacity.animation(.easeInOut(duration: 0.18)))
+                .zIndex(110)
+            }
+
+            if isShowingModelInfo {
+                DismissibleModal(isPresented: $isShowingModelInfo) {
+                    ModelInfoSheet(
+                        isPresented: $isShowingModelInfo,
+                        activeKind: matcher.activeKind
+                    )
+                }
+                .transition(.opacity.animation(.easeInOut(duration: 0.18)))
+                .zIndex(110)
+            }
         }
         .preferredColorScheme(theme.preference.colorScheme)
         .animation(.easeInOut(duration: 0.20), value: theme.preference)
@@ -65,18 +92,6 @@ struct ContentView: View {
             } onBrowseFile: {
                 selectSelfieFile()
             }
-        }
-        .sheet(isPresented: $isShowingPrivacyNotice) {
-            PrivacyNoticeSheet(
-                isPresented: $isShowingPrivacyNotice,
-                hasAcceptedBiometricNotice: $hasAcceptedBiometricNotice
-            )
-        }
-        .sheet(isPresented: $isShowingModelInfo) {
-            ModelInfoSheet(
-                isPresented: $isShowingModelInfo,
-                activeKind: matcher.activeKind
-            )
         }
         .sheet(isPresented: $isShowingSaveFolderSheet) {
             SaveFolderSheet(
@@ -1715,6 +1730,15 @@ private struct LightboxView: View {
                         )
 
                         ZStack {
+                            // Invisible click-to-dismiss backdrop that fills
+                            // the letterbox area around the photo. Clicks on
+                            // the photo itself are absorbed by the image's
+                            // own tap gesture below, so only clicks in the
+                            // surrounding empty space reach this layer.
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .onTapGesture { dismiss() }
+
                             if let img = fullImage {
                                 // Wrap image + face overlay in a single
                                 // aspect-constrained ZStack so the ellipse
@@ -1762,17 +1786,22 @@ private struct LightboxView: View {
                                     zoomScale = max(1.0, min(8.0, zoomScale * factor))
                                     clampOffset(in: geo.size)
                                 }
+                                // Double-tap toggles zoom on the photo itself.
+                                .onTapGesture(count: 2) {
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                                        if zoomScale > 1.0 { resetZoom() } else { zoomScale = 2.5 }
+                                    }
+                                }
+                                // Single-tap on the photo is absorbed so a
+                                // click on the picture does NOT dismiss the
+                                // lightbox. Only clicks on the surrounding
+                                // black area reach the dismiss backdrop.
+                                .onTapGesture { /* absorb */ }
                             } else {
                                 ProgressView().scaleEffect(1.2).tint(.white)
                             }
                         }
                         .frame(width: geo.size.width, height: geo.size.height)
-                        .contentShape(Rectangle())
-                        .onTapGesture(count: 2) {
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
-                                if zoomScale > 1.0 { resetZoom() } else { zoomScale = 2.5 }
-                            }
-                        }
                     }
 
                     HStack {
@@ -2119,6 +2148,38 @@ private struct ResultTile: View {
 
     private func revealInFinder() {
         NSWorkspace.shared.activateFileViewerSelecting([result.fileURL])
+    }
+}
+
+/// A modal container that dims the rest of the window and dismisses when the
+/// user clicks the backdrop or presses Escape. Used in place of `.sheet` for
+/// informational dialogs (privacy notice, model info) where the click-outside
+/// affordance is expected.
+///
+/// Clicks inside the content card are absorbed by the card's own background +
+/// `.contentShape`, so they do not propagate to the backdrop's tap gesture.
+struct DismissibleModal<Content: View>: View {
+    @Binding var isPresented: Bool
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        ZStack {
+            // Dim layer — tapping anywhere outside the content dismisses.
+            Color.black.opacity(0.45)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { isPresented = false }
+
+            // Content card — its own background absorbs the tap so clicks
+            // inside don't fall through to the backdrop above.
+            content()
+                .clipShape(RoundedRectangle(cornerRadius: Radius.l))
+                .shadow(color: .black.opacity(0.35), radius: 24, x: 0, y: 12)
+                .contentShape(Rectangle())
+                .onTapGesture { /* absorb */ }
+        }
+        // Escape key also dismisses, matching standard macOS modal behavior.
+        .onExitCommand { isPresented = false }
     }
 }
 
