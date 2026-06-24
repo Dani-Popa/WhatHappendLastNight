@@ -275,8 +275,8 @@ enum FaceModelKind {
                 cosineCeiling: FaceMatcher.adafaceCosineCeiling,
                 confidenceCurve: .sigmoid(k: 8.0),
                 displayName: "AdaFace",
-                blurb: "IResNet IR18 · 112×112 · recommended",
-                sfSymbol: "person.crop.square.badge.checkmark")
+                blurb: "IResNet IR18 · recommended",
+                sfSymbol: "person.crop.square")
         case .facenet512:
             // Sandberg VGGFace2 checkpoint. 160×160 RGB, (x-127.5)/128 TF
             // preprocessing. MTCNN-aligned crops with ~32px margin (≈1.30x
@@ -300,8 +300,8 @@ enum FaceModelKind {
                 cosineCeiling: FaceMatcher.facenet512CosineCeiling,
                 confidenceCurve: .sigmoid(k: 8.0),
                 displayName: "FaceNet 512",
-                blurb: "VGGFace2 · 160×160 · 512-d (Sandberg)",
-                sfSymbol: "person.crop.square.filled.and.at.rectangle")
+                blurb: "VGGFace2 · 512-d (Sandberg)",
+                sfSymbol: "person.crop.square.fill")
         case .facenet:
             // Legacy Facenet6 triplet-loss model. 160×160 RGB, loose
             // 1.50x bbox crops with no alignment (trained that way). No
@@ -328,7 +328,7 @@ enum FaceModelKind {
                 cosineCeiling: FaceMatcher.facenetCosineCeiling,
                 confidenceCurve: .piecewise,
                 displayName: "FaceNet",
-                blurb: "Inception ResNet · 160×160 · legacy",
+                blurb: "Inception ResNet · legacy",
                 sfSymbol: "person.crop.square")
         }
     }
@@ -831,16 +831,19 @@ class FaceMatcher: ObservableObject {
         }
         self.availableKinds = available
 
-        // Load order: previously-chosen kind (if available) > AdaFace > FaceNet > FaceNet 512.
-        // Each branch falls through to the next on failure so an unconfigured
-        // build still works the same as before.
+        // Load order: previously-chosen kind (if available) > AdaFace >
+        // FaceNet 512 (Sandberg) > legacy Facenet6. Each branch falls
+        // through to the next on failure so an unconfigured build still
+        // boots with whatever model is present. Legacy FaceNet is no
+        // longer offered as a UI choice — it lives here purely as a
+        // last-resort fallback.
         let savedKind = Self.loadSavedKind()
         let loadOrder: [FaceModelKind]
         switch savedKind {
         case .some(let kind) where available.contains(kind):
-            loadOrder = [kind, .adaface, .facenet, .facenet512].uniqued()
+            loadOrder = [kind, .adaface, .facenet512, .facenet].uniqued()
         default:
-            loadOrder = [.adaface, .facenet, .facenet512]
+            loadOrder = [.adaface, .facenet512, .facenet]
         }
 
         for kind in loadOrder {
@@ -876,14 +879,23 @@ class FaceMatcher: ObservableObject {
 
         do {
             let model = try FaceEmbeddingModel(modelNames: Self.modelNames(for: kind))
+            // Report the model that actually loaded, not the requested
+            // kind — e.g. picking FaceNet 512 on a build that only ships
+            // the legacy Facenet6 bundle loads legacy and we want the
+            // status bar to say so.
+            let loadedKind = model.kind
             DispatchQueue.main.async {
                 self.embeddingModel = model
                 self.modelLoadError = nil
-                self.statusText = "MODEL SET: \(kind.displayName.uppercased())"
+                self.statusText = "MODEL SET: \(loadedKind.displayName.uppercased())"
             }
-            Self.saveKind(kind)
+            Self.saveKind(loadedKind)
             #if DEBUG
-            print("Face matcher switched to \(kind) model.")
+            if loadedKind == kind {
+                print("Face matcher switched to \(kind) model.")
+            } else {
+                print("Face matcher requested \(kind) but loaded \(loadedKind) as fallback.")
+            }
             #endif
             return true
         } catch {
@@ -902,7 +914,16 @@ class FaceMatcher: ObservableObject {
         switch kind {
         case .adaface: return FaceEmbeddingModel.adafaceModelNames
         case .facenet: return FaceEmbeddingModel.facenetModelNames
-        case .facenet512: return FaceEmbeddingModel.facenet512ModelNames
+        // FaceNet 512 (Sandberg VGGFace2) is the user-facing choice; the
+        // legacy Facenet6 bundle is no longer selectable from the UI but
+        // stays in the candidate list as a silent last-resort fallback so
+        // builds shipped without the 512-d .mlpackage still produce
+        // embeddings instead of failing outright. The loader infers the
+        // actual `FaceModelKind` from whichever resource name resolves
+        // first, so the cosine bands and preprocessing stay correct for
+        // the model that's actually loaded.
+        case .facenet512:
+            return FaceEmbeddingModel.facenet512ModelNames + FaceEmbeddingModel.facenetModelNames
         }
     }
 

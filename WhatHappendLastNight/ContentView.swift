@@ -19,6 +19,7 @@ struct ContentView: View {
     @State private var isFolderHovered = false
     @State private var isShowingCameraSheet = false
     @State private var isShowingPrivacyNotice = false
+    @State private var isShowingModelInfo = false
     @State private var hasAcceptedBiometricNotice = false
     @State private var selectedResultID: MatchResult.ID? = nil
     @State private var lightboxIndex: Int? = nil
@@ -71,6 +72,12 @@ struct ContentView: View {
                 hasAcceptedBiometricNotice: $hasAcceptedBiometricNotice
             )
         }
+        .sheet(isPresented: $isShowingModelInfo) {
+            ModelInfoSheet(
+                isPresented: $isShowingModelInfo,
+                activeKind: matcher.activeKind
+            )
+        }
         .sheet(isPresented: $isShowingSaveFolderSheet) {
             SaveFolderSheet(
                 folderPath: sourceFolderURL?.path ?? "",
@@ -109,7 +116,14 @@ struct ContentView: View {
                 ClearSessionButton(onClear: clearLocalData)
             }
 
-            ModelPickerButton(matcher: matcher)
+            ModelPickerButton(
+                matcher: matcher,
+                onShowInfo: { isShowingModelInfo = true }
+            )
+            HeaderIconButton(
+                systemName: "info.circle",
+                help: "How face matching works"
+            ) { isShowingModelInfo = true }
             ThemeToggleButton()
             HeaderIconButton(
                 systemName: "questionmark.circle",
@@ -460,6 +474,7 @@ private struct HeaderIconButton: View {
                 .background(isHovered ? Tokens.surfaceElevated : Tokens.surface)
                 .clipShape(Circle())
                 .overlay(Circle().stroke(Tokens.border, lineWidth: 1))
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
@@ -490,6 +505,7 @@ private struct ClearSessionButton: View {
                     .stroke(isHovered ? Tokens.error.opacity(0.5) : Tokens.border,
                             lineWidth: 1)
             )
+            .contentShape(RoundedRectangle(cornerRadius: Radius.m))
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
@@ -506,56 +522,68 @@ private struct ClearSessionButton: View {
 /// `FaceMatcher.selectModel(_:)`.
 private struct ModelPickerButton: View {
     @ObservedObject var matcher: FaceMatcher
+    /// Opens the per-model details sheet. Surfaced both via an `info.circle`
+    /// button next to the picker in the header and as a "Learn more about
+    /// these models…" item at the bottom of this menu, so users can dig in
+    /// from either entry point.
+    let onShowInfo: () -> Void
     @State private var isHovered = false
 
-    /// All known kinds in the order we want them to appear in the menu.
-    /// AdaFace first because it's the recommended default; the Sandberg
-    /// 512-d FaceNet sits between the two FaceNet variants.
-    private let allKinds: [FaceModelKind] = [.adaface, .facenet512, .facenet]
+    /// Short, no-frills name shown in the dropdown rows and on the toolbar
+    /// button. The status bar and info sheet keep the longer `displayName`
+    /// ("FaceNet 512") so internal logs and the model-details surface still
+    /// disambiguate the Sandberg 512-d build from the legacy bundle.
+    private static func menuLabel(for kind: FaceModelKind) -> String {
+        switch kind {
+        case .adaface:    return "AdaFace"
+        case .facenet512: return "FaceNet"
+        case .facenet:    return "FaceNet (legacy)"
+        }
+    }
+
+    /// All selectable kinds in the order we want them to appear in the menu.
+    /// AdaFace first because it's the recommended default; FaceNet 512
+    /// (Sandberg VGGFace2) as the alternative. The legacy Facenet6 is no
+    /// longer user-selectable — it sits silently behind FaceNet 512 as a
+    /// last-resort fallback in `FaceMatcher` for builds that ship without
+    /// the 512-d mlpackage.
+    private let allKinds: [FaceModelKind] = [.adaface, .facenet512]
 
     private var activeKind: FaceModelKind? { matcher.activeKind }
 
     private var label: String {
-        activeKind?.displayName ?? "No Model"
+        guard let kind = activeKind else { return "No Model" }
+        return Self.menuLabel(for: kind)
     }
 
     private var icon: String {
         activeKind?.sfSymbol ?? "exclamationmark.triangle"
     }
 
-    var body: some View {
-        Menu {
-            ForEach(allKinds, id: \.self) { kind in
-                let available = matcher.availableKinds.contains(kind)
-                Button {
-                    matcher.selectModel(kind)
-                } label: {
-                    // Checkmark on the active kind so the menu always shows
-                    // the current state at a glance. We prefix the title text
-                    // rather than using a real Image — NSMenu in SwiftUI on
-                    // macOS strips most label decorations and the title is
-                    // the only field that reliably shows the chosen state.
-                    let prefix = activeKind == kind ? "✓ " : "   "
-                    Text("\(prefix)\(kind.displayName) — \(available ? kind.blurb : "Not bundled")")
-                }
-                .disabled(!available)
-            }
-        } label: {
-            HStack(spacing: Space.xs + 2) {
-                Image(systemName: icon)
-                    .font(.system(size: 11, weight: .semibold))
-                Text(label)
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .tracking(0.5)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
-                    .opacity(0.7)
-            }
-            .foregroundColor(Tokens.textSecondary)
+    // The visible chip — painted as a static view with no hit testing.
+    // Lives outside the Menu because macOS `.menuStyle(.borderlessButton)`
+    // trims the rendered area to the label's text bounds and discards
+    // background/overlay modifiers applied either inside the label or on
+    // the Menu wrapper. A ZStack with this chip behind a transparent
+    // Menu label is the only reliable way to get a fully-styled,
+    // fully-clickable pill on macOS.
+    @ViewBuilder
+    private var chipContent: some View {
+        HStack(spacing: Space.xs + 2) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .semibold))
+            Text("MODEL ·")
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .tracking(0.7)
+                .foregroundColor(Tokens.textTertiary)
+            Text(label)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .tracking(0.5)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .bold))
+                .opacity(0.7)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
+        .foregroundColor(Tokens.textSecondary)
         .padding(.horizontal, Space.m)
         .frame(height: 32)
         .background(isHovered ? Tokens.surfaceElevated : Tokens.surface)
@@ -564,10 +592,44 @@ private struct ModelPickerButton: View {
             RoundedRectangle(cornerRadius: Radius.m)
                 .stroke(Tokens.border, lineWidth: 1)
         )
+    }
+
+    var body: some View {
+        // Use the chip directly as the Menu's label. The earlier overlay+
+        // invisible-label pattern produced a zero-sized hit area under
+        // `.menuStyle(.borderlessButton)`, so clicks never reached the
+        // Menu (hover still worked because `.onHover` is on the outer
+        // composed view). `.menuStyle(.button)` honors the custom label's
+        // intrinsic size and keeps the chip's background/border intact;
+        // `.menuIndicator(.hidden)` suppresses the system chevron since
+        // the chip already draws one.
+        Menu {
+            ForEach(allKinds, id: \.self) { kind in
+                let available = matcher.availableKinds.contains(kind)
+                Button {
+                    matcher.selectModel(kind)
+                } label: {
+                    let prefix = activeKind == kind ? "✓ " : "   "
+                    let suffix = available ? "" : "  (not bundled)"
+                    Text("\(prefix)\(Self.menuLabel(for: kind))\(suffix)")
+                }
+                .disabled(!available)
+            }
+            Divider()
+            Button("Learn more about these models…", action: onShowInfo)
+        } label: {
+            chipContent
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
         .onHover { isHovered = $0 }
-        .help("Face recognition model: \(label)")
-        .accessibilityLabel("Face recognition model")
+        .help("Face recognition model — click to switch (current: \(label))")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Face recognition model picker")
         .accessibilityValue(label)
+        .accessibilityHint("Opens a menu to switch the face recognition model")
     }
 }
 
@@ -596,6 +658,7 @@ private struct ThemeToggleButton: View {
                 .background(isHovered ? Tokens.surfaceElevated : Tokens.surface)
                 .clipShape(Circle())
                 .overlay(Circle().stroke(Tokens.border, lineWidth: 1))
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
@@ -661,6 +724,7 @@ private struct IdentityStrip: View {
                     .frame(width: 18, height: 18)
                     .background(isHovered ? Tokens.error.opacity(0.12) : Color.clear)
                     .clipShape(Circle())
+                    .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .onHover { isHovered = $0 }
@@ -2156,6 +2220,133 @@ struct PrivacyNoticeRow: View {
                 .foregroundColor(Tokens.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+/// Per-model description sheet. Mirrors `PrivacyNoticeSheet` in layout so the
+/// app has a consistent "information surface" style. Content is sourced from
+/// the strategy comments in `FaceMatcher.swift` (preprocessing, alignment,
+/// TTA, cosine bands) and rewritten in user-facing language. Reached from
+/// the `info.circle` button in the header and from the "Learn more…" entry
+/// at the bottom of `ModelPickerButton`'s menu.
+struct ModelInfoSheet: View {
+    @Binding var isPresented: Bool
+    /// Currently loaded kind, used to mark which card is active so the user
+    /// can map the descriptions back to the model in use.
+    let activeKind: FaceModelKind?
+
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: Space.l) {
+                HStack(spacing: Space.s) {
+                    Image(systemName: "brain.head.profile")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundColor(Tokens.accentPrimary)
+                    Text("Face Matching Models")
+                        .font(Typography.h2)
+                        .foregroundColor(Tokens.textPrimary)
+                }
+
+                VStack(alignment: .leading, spacing: Space.s) {
+                    Text("How a match is decided")
+                        .font(Typography.label)
+                        .foregroundColor(Tokens.accentPrimary)
+                    Text("Apple Vision finds the faces in each photo, the app crops and (depending on the model) aligns them by eye position, then the model turns each face into a numeric signature called an embedding. Your selfie's embedding is compared against every face's embedding using cosine similarity — a single number between 0 and 1 measuring how close two faces point in the model's feature space. The strictness slider maps onto each model's calibrated decision boundary so 70% always means the same thing in practice, even though the raw cosine numbers differ per model.")
+                        .font(Typography.body)
+                        .foregroundColor(Tokens.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Divider()
+
+                ModelInfoCard(
+                    title: "AdaFace",
+                    subtitle: "IResNet IR18 · recommended default",
+                    isActive: activeKind == .adaface,
+                    rows: [
+                        ("Architecture", "IResNet IR18 backbone trained with AdaFace loss — a modern face recognition objective that adapts its margin per sample based on image quality. Produces a 512-dimensional embedding."),
+                        ("Input format", "112×112 BGR crop, normalized to roughly [-1, 1] before the network sees it."),
+                        ("Alignment", "Faces are rotated, scaled, and shifted using Vision's eye landmarks so both pupils sit on a fixed horizontal line. The network was trained on aligned crops, so pre-alignment matches its expectations and removes most pose noise."),
+                        ("Test-time augmentation", "On — the embedding is averaged across the original crop and its horizontal flip, which cancels out left/right pose asymmetry for free."),
+                        ("Decision boundary", "Same-person cosine typically lands around 0.36 on this model, very different from FaceNet's range. The strictness slider is calibrated around this so 70% means the same operating point as on the other models."),
+                        ("Best for", "Default everyday scanning. Most accurate of the three on hard cases (off-angle, partial profile, mixed lighting).")
+                    ]
+                )
+
+                ModelInfoCard(
+                    title: "FaceNet 512",
+                    subtitle: "VGGFace2 · 512-d (Sandberg checkpoint)",
+                    isActive: activeKind == .facenet512,
+                    rows: [
+                        ("Architecture", "Inception-ResNet-v1 trained on the VGGFace2 dataset using David Sandberg's `20180402-114759` checkpoint, converted to CoreML. Produces a 512-dimensional embedding (hence the name)."),
+                        ("Input format", "160×160 RGB crop, normalized with Sandberg's standard preprocessing `(pixel − 127.5) / 128`."),
+                        ("Alignment", "Faces are landmark-aligned with a ~1.30× bounding-box margin around the detected face — matching the MTCNN-aligned crops the model was trained on."),
+                        ("Test-time augmentation", "On — same flip-average trick as AdaFace. The Sandberg checkpoint benefits from this since it was trained with random horizontal flips."),
+                        ("Decision boundary", "Same-person cosine typically lands near 0.61. The strictness slider re-maps to this range so 70% is comparable across models."),
+                        ("Best for", "A useful second opinion when AdaFace is uncertain, or when you want a model whose embeddings can be compared against the wider FaceNet ecosystem.")
+                    ]
+                )
+
+                HStack {
+                    Spacer()
+                    Button("Close") { isPresented = false }
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(Space.xl)
+        }
+        .frame(width: 640, height: 680)
+        .background(Tokens.surface)
+    }
+}
+
+/// A single model's description card. Visually distinguishes the active
+/// model with a colored border so users can tell at a glance which one's
+/// loaded right now.
+private struct ModelInfoCard: View {
+    let title: String
+    let subtitle: String
+    let isActive: Bool
+    let rows: [(String, String)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Space.s) {
+            HStack(spacing: Space.s) {
+                Text(title)
+                    .font(Typography.h3)
+                    .foregroundColor(Tokens.textPrimary)
+                if isActive {
+                    Text("ACTIVE")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .tracking(0.7)
+                        .foregroundColor(Tokens.accentSecondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Tokens.scoreHighBg)
+                        .clipShape(Capsule())
+                        .overlay(Capsule().stroke(Tokens.accentSecondary.opacity(0.35), lineWidth: 1))
+                }
+                Spacer()
+            }
+            Text(subtitle)
+                .font(Typography.caption)
+                .foregroundColor(Tokens.textTertiary)
+
+            VStack(alignment: .leading, spacing: Space.s) {
+                ForEach(rows, id: \.0) { row in
+                    PrivacyNoticeRow(title: row.0, message: row.1)
+                }
+            }
+            .padding(.top, Space.xs)
+        }
+        .padding(Space.m)
+        .background(Tokens.surfaceSunken)
+        .clipShape(RoundedRectangle(cornerRadius: Radius.m))
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.m)
+                .stroke(isActive ? Tokens.accentSecondary.opacity(0.55) : Tokens.border,
+                        lineWidth: isActive ? 1.5 : 1)
+        )
     }
 }
 
