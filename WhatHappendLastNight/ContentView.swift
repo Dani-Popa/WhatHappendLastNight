@@ -109,6 +109,7 @@ struct ContentView: View {
                 ClearSessionButton(onClear: clearLocalData)
             }
 
+            ModelPickerButton(matcher: matcher)
             ThemeToggleButton()
             HeaderIconButton(
                 systemName: "questionmark.circle",
@@ -493,6 +494,78 @@ private struct ClearSessionButton: View {
         .onHover { isHovered = $0 }
         .help("Withdraw consent and erase all in-memory session data")
         .accessibilityLabel("Clear session and withdraw biometric consent")
+    }
+}
+
+/// Toolbar control that surfaces which recognition model is loaded and lets
+/// the user switch between AdaFace and FaceNet. Choices that aren't bundled
+/// with this build (i.e. someone shipped without the .mlpackage) are shown
+/// disabled rather than hidden, so the user can tell "model missing" apart
+/// from "model not supported." The choice is persisted in UserDefaults by
+/// `FaceMatcher.selectModel(_:)`.
+private struct ModelPickerButton: View {
+    @ObservedObject var matcher: FaceMatcher
+    @State private var isHovered = false
+
+    /// All known kinds in the order we want them to appear in the menu.
+    /// AdaFace first because it's the recommended default.
+    private let allKinds: [FaceModelKind] = [.adaface, .facenet]
+
+    private var activeKind: FaceModelKind? { matcher.activeKind }
+
+    private var label: String {
+        activeKind?.displayName ?? "No Model"
+    }
+
+    private var icon: String {
+        activeKind?.sfSymbol ?? "exclamationmark.triangle"
+    }
+
+    var body: some View {
+        Menu {
+            ForEach(allKinds, id: \.self) { kind in
+                let available = matcher.availableKinds.contains(kind)
+                Button {
+                    matcher.selectModel(kind)
+                } label: {
+                    // Checkmark on the active kind so the menu always shows
+                    // the current state at a glance. We prefix the title text
+                    // rather than using a real Image — NSMenu in SwiftUI on
+                    // macOS strips most label decorations and the title is
+                    // the only field that reliably shows the chosen state.
+                    let prefix = activeKind == kind ? "✓ " : "   "
+                    Text("\(prefix)\(kind.displayName) — \(available ? kind.blurb : "Not bundled")")
+                }
+                .disabled(!available)
+            }
+        } label: {
+            HStack(spacing: Space.xs + 2) {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .semibold))
+                Text(label)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .tracking(0.5)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .opacity(0.7)
+            }
+            .foregroundColor(Tokens.textSecondary)
+            .padding(.horizontal, Space.m)
+            .frame(height: 32)
+            .background(isHovered ? Tokens.surfaceElevated : Tokens.surface)
+            .clipShape(RoundedRectangle(cornerRadius: Radius.m))
+            .overlay(
+                RoundedRectangle(cornerRadius: Radius.m)
+                    .stroke(Tokens.border, lineWidth: 1)
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .onHover { isHovered = $0 }
+        .help("Face recognition model: \(label)")
+        .accessibilityLabel("Face recognition model")
+        .accessibilityValue(label)
     }
 }
 

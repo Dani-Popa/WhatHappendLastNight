@@ -44,29 +44,142 @@ private enum FaceMatcherError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .modelNotFound(let names):
-            return "FaceNet CoreML model not found. Add one of these to the app target: \(names.map { $0 + ".mlmodel" }.joined(separator: ", "))"
+            return "Face recognition CoreML model not found. Add one of these to the app target: \(names.map { $0 + ".mlmodel(c) or .mlpackage" }.joined(separator: ", "))"
         case .modelHasNoInputs:
             return "The CoreML model has no input description."
         case .modelHasNoOutputs:
             return "The CoreML model has no output description."
         case .unsupportedInputType(let type):
-            return "Unsupported FaceNet model input type: \(type). Expected image or MLMultiArray."
+            return "Unsupported model input type: \(type). Expected image or MLMultiArray."
         case .pixelBufferCreationFailed:
             return "Could not create the normalized face pixel buffer."
         case .pixelBufferContextFailed:
             return "Could not create CGContext for face preprocessing."
         case .missingModelOutput(let name):
-            return "The FaceNet model did not return output named \(name)."
+            return "The model did not return output named \(name)."
         case .unsupportedModelOutput:
-            return "The FaceNet model output is not an MLMultiArray embedding."
+            return "The model output is not an MLMultiArray embedding."
         case .noFaceDetected:
             return "No usable face detected."
         }
     }
 }
 
+/// Which face recognition architecture is loaded. Preprocessing, channel
+/// order, and the useful cosine band all differ between FaceNet (Inception
+/// ResNet, 160×160 RGB, [-1,1]) and AdaFace (IResNet, 112×112 BGR, [-1,1]).
+/// We carry the kind alongside the model so inference and confidence scaling
+/// can fork on it without scattering string-matching across the file.
+enum FaceModelKind {
+    case facenet
+    case adaface
+
+    /// Best-guess from the model's file name. AdaFace and ArcFace-family
+    /// backbones (IResNet "IR18/IR50/IR100") all use the same preprocessing
+    /// and cosine band, so we lump them together as `.adaface`.
+    static func infer(from modelFileName: String) -> FaceModelKind {
+        let lower = modelFileName.lowercased()
+        if lower.contains("adaface")
+            || lower.contains("arcface")
+            || lower.contains("ir18")
+            || lower.contains("ir50")
+            || lower.contains("ir100")
+            || lower.contains("iresnet") {
+            return .adaface
+        }
+        return .facenet
+    }
+
+    /// FaceNet's TF-style preprocessing — `(x - 127.5) / 128` — vs. AdaFace's
+    /// PyTorch-style `(x - 127.5) / 127.5`. Functionally close, but using the
+    /// exact training-time normalization noticeably improves cosine scores.
+    var pixelScale: Float {
+        switch self {
+        case .facenet: return 1.0 / 128.0
+        case .adaface: return 1.0 / 127.5
+        }
+    }
+
+    var pixelBias: Float {
+        switch self {
+        case .facenet: return -127.5 / 128.0
+        case .adaface: return -1.0
+        }
+    }
+
+    /// AdaFace was trained on BGR-ordered crops (ArcFace lineage); FaceNet on
+    /// RGB. Getting this wrong silently halves the model's accuracy — the
+    /// network still produces an embedding, just a worse one — so it's worth
+    /// being explicit here.
+    var useBGRChannelOrder: Bool {
+        switch self {
+        case .facenet: return false
+        case .adaface: return true
+        }
+    }
+
+    /// Fallback input size if the model description doesn't expose one.
+    /// FaceNet ships at 160; AdaFace/ArcFace IResNet variants at 112.
+    var fallbackImageSize: Int {
+        switch self {
+        case .facenet: return 160
+        case .adaface: return 112
+        }
+    }
+
+    /// Short, user-facing label shown in the toolbar picker.
+    var displayName: String {
+        switch self {
+        case .facenet: return "FaceNet"
+        case .adaface: return "AdaFace"
+        }
+    }
+
+    /// One-line description used in the picker menu so the user can tell why
+    /// they'd pick one over the other without digging into the source.
+    var blurb: String {
+        switch self {
+        case .facenet: return "Inception ResNet · 160×160 · legacy"
+        case .adaface: return "IResNet IR18 · 112×112 · recommended"
+        }
+    }
+
+    /// SF Symbol used as the picker's leading icon.
+    var sfSymbol: String {
+        switch self {
+        case .facenet: return "person.crop.square"
+        case .adaface: return "person.crop.square.badge.checkmark"
+        }
+    }
+}
+
+private extension Array where Element: Hashable {
+    /// Stable de-dup — preserves first occurrence order. Used to build the
+    /// model load chain without listing the preferred kind twice.
+    func uniqued() -> [Element] {
+        var seen = Set<Element>()
+        return filter { seen.insert($0).inserted }
+    }
+}
+
 final class FaceEmbeddingModel {
-    static let defaultModelNames = [
+    /// Try these in order, AdaFace first. Both " 2" and underscore variants
+    /// are listed because Finder appends " 2" when duplicating a file and the
+    /// user may drag either spelling into Xcode. Xcode compiles .mlpackage
+    /// directly to .mlmodelc at build time, so we look for that extension.
+    static let adafaceModelNames = [
+        "AdaFace_IR18",
+        "AdaFace_IR18 2",
+        "AdaFace-IR18",
+        "AdaFaceIR18",
+        "AdaFace_IR50",
+        "AdaFace",
+        "ArcFace",
+        "ArcFace_IR18"
+    ]
+
+    static let facenetModelNames = [
+        "Facenet6",
         "FaceNet",
         "facenet",
         "Facenet",
@@ -75,6 +188,11 @@ final class FaceEmbeddingModel {
         "model"
     ]
 
+    /// Default load order — try every AdaFace candidate before falling back
+    /// to FaceNet. Whichever name actually exists in the bundle wins.
+    static let defaultModelNames = adafaceModelNames + facenetModelNames
+
+    let kind: FaceModelKind
     private let model: MLModel
     private let inputName: String
     private let outputName: String
@@ -82,12 +200,13 @@ final class FaceEmbeddingModel {
     private let imageSize: Int
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
-    init(modelNames: [String] = FaceEmbeddingModel.defaultModelNames, fallbackImageSize: Int = 160) throws {
-        let modelURL = try Self.findCompiledModelURL(modelNames: modelNames)
+    init(modelNames: [String] = FaceEmbeddingModel.defaultModelNames) throws {
+        let (modelURL, resolvedName) = try Self.findCompiledModelURL(modelNames: modelNames)
         let configuration = MLModelConfiguration()
         configuration.computeUnits = .all
 
         self.model = try MLModel(contentsOf: modelURL, configuration: configuration)
+        self.kind = FaceModelKind.infer(from: resolvedName)
 
         guard let firstInput = self.model.modelDescription.inputDescriptionsByName.first(where: {
             $0.value.type == .image || $0.value.type == .multiArray
@@ -103,26 +222,44 @@ final class FaceEmbeddingModel {
         self.inputName = firstInput.key
         self.inputDescription = firstInput.value
         self.outputName = firstOutput.key
-        self.imageSize = Self.inferImageSize(from: firstInput.value) ?? fallbackImageSize
+        self.imageSize = Self.inferImageSize(from: firstInput.value) ?? kind.fallbackImageSize
 
         #if DEBUG
-        print("Loaded FaceNet model: \(modelURL.lastPathComponent), input: \(inputName), output: \(outputName), size: \(imageSize)x\(imageSize)")
+        print("Loaded face model: \(modelURL.lastPathComponent) [\(kind)], input: \(inputName), output: \(outputName), size: \(imageSize)x\(imageSize)")
         #endif
     }
 
-    private static func findCompiledModelURL(modelNames: [String]) throws -> URL {
+    /// Cheap availability probe. Walks the bundle for any of the supplied
+    /// candidate names with `.mlmodelc` (Xcode-compiled) or `.mlmodel` (raw)
+    /// extensions, without actually loading the model. The picker UI uses
+    /// this to decide which options to enable.
+    static func isAnyResourceBundled(names: [String]) -> Bool {
+        for name in names {
+            if Bundle.main.url(forResource: name, withExtension: "mlmodelc") != nil { return true }
+            if Bundle.main.url(forResource: name, withExtension: "mlmodel") != nil { return true }
+        }
+        return false
+    }
+
+    /// Returns the resolved bundle URL together with the resource name we
+    /// matched on — the name drives `FaceModelKind` inference so the caller
+    /// can't accidentally lose track of which architecture is loaded.
+    private static func findCompiledModelURL(modelNames: [String]) throws -> (URL, String) {
         for name in modelNames {
             if let compiled = Bundle.main.url(forResource: name, withExtension: "mlmodelc") {
-                return compiled
+                return (compiled, name)
             }
             if let raw = Bundle.main.url(forResource: name, withExtension: "mlmodel") {
-                return try MLModel.compileModel(at: raw)
+                return (try MLModel.compileModel(at: raw), name)
             }
         }
 
+        // Last-resort discovery: if exactly one compiled model is bundled,
+        // use it. The file name still drives kind inference.
         let bundledCompiledModels = Bundle.main.urls(forResourcesWithExtension: "mlmodelc", subdirectory: nil) ?? []
         if bundledCompiledModels.count == 1, let onlyModel = bundledCompiledModels.first {
-            return onlyModel
+            let stem = onlyModel.deletingPathExtension().lastPathComponent
+            return (onlyModel, stem)
         }
 
         throw FaceMatcherError.modelNotFound(modelNames)
@@ -180,6 +317,54 @@ final class FaceEmbeddingModel {
         }
 
         return l2Normalized(vector)
+    }
+
+    /// Test-time augmentation: embed both the original crop and its horizontal
+    /// flip, then average. Standard AdaFace/ArcFace inference trick — costs
+    /// 2× the per-face latency but eliminates pose-dependent embedding noise
+    /// (faces rarely sit perfectly head-on, and a network trained on randomly
+    /// flipped data is invariant to mirror reflection). FaceNet gains less
+    /// from this (its embedding is already fairly flip-invariant from its
+    /// triplet loss training), so we only apply TTA when AdaFace is loaded.
+    func embeddingWithTTA(from faceCGImage: CGImage) throws -> [Float] {
+        guard kind == .adaface else {
+            return try embedding(from: faceCGImage)
+        }
+
+        let original = try embedding(from: faceCGImage)
+
+        // Horizontal flip via CIImage. The flip transform mirrors around
+        // x=0 and shifts back so the image stays in positive coords —
+        // CIImage's coordinate system is bottom-left origin so we only flip
+        // X, not Y.
+        let flippedCI = CIImage(cgImage: faceCGImage)
+            .transformed(by: CGAffineTransform(scaleX: -1, y: 1)
+                .translatedBy(x: -CGFloat(faceCGImage.width), y: 0))
+        let flippedExtent = CGRect(x: 0, y: 0,
+                                   width: faceCGImage.width,
+                                   height: faceCGImage.height)
+        guard let flippedCG = ciContext.createCGImage(flippedCI, from: flippedExtent) else {
+            // If we can't render the flip, fall back to the unaugmented
+            // embedding — better to have a slightly worse result than to
+            // fail the whole match.
+            return original
+        }
+
+        let flipped = try embedding(from: flippedCG)
+
+        // Both embeddings are already L2-normalized by `embedding(from:)`,
+        // so summing then re-normalizing gives us the unit-length midpoint
+        // direction, which is what we want.
+        var combined = [Float](repeating: 0, count: min(original.count, flipped.count))
+        for i in 0..<combined.count {
+            combined[i] = original[i] + flipped[i]
+        }
+        let count = vDSP_Length(combined.count)
+        var sumOfSquares: Float = 0
+        vDSP_svesq(combined, 1, &sumOfSquares, count)
+        var inverseNorm = 1.0 / sqrt(max(sumOfSquares, 1e-12))
+        vDSP_vsmul(combined, 1, &inverseNorm, &combined, 1, count)
+        return combined
     }
 
     private func makeResizedPixelBuffer(from cgImage: CGImage, size: Int) throws -> CVPixelBuffer {
@@ -250,21 +435,29 @@ final class FaceEmbeddingModel {
 
         let (yStride, xStride, cStride) = Self.spatialStrides(shape: normalizedShape, strides: strides)
 
-        let scale: Float = 1.0 / 128.0
-        let bias: Float = -127.5 / 128.0
+        // Preprocessing differs per architecture — see `FaceModelKind` for
+        // the exact constants. The pixel buffer is always BGRA (we create it
+        // with `kCVPixelFormatType_32BGRA` upstream), so we read B/G/R from
+        // fixed byte offsets here and only the *write order* into the tensor
+        // changes between FaceNet (RGB) and AdaFace (BGR).
+        let scale: Float = kind.pixelScale
+        let bias: Float = kind.pixelBias
+        // BGRA buffer byte offsets: 0=B, 1=G, 2=R. Pick the write order so
+        // AdaFace gets B, G, R and FaceNet gets R, G, B.
+        let writeOrder: (Int, Int, Int) = kind.useBGRChannelOrder
+            ? (0, 1, 2)   // B, G, R
+            : (2, 1, 0)   // R, G, B
 
         for y in 0..<imageSize {
             let row = src.advanced(by: y * bytesPerRow)
             let yOffset = y * yStride
             for x in 0..<imageSize {
                 let pixel = row.advanced(by: x * 4)
-                let b = Float(pixel[0])
-                let g = Float(pixel[1])
-                let r = Float(pixel[2])
+                let channels: [Float] = [Float(pixel[0]), Float(pixel[1]), Float(pixel[2])]
                 let base = yOffset + x * xStride
-                dst[base + 0 * cStride] = r * scale + bias
-                dst[base + 1 * cStride] = g * scale + bias
-                dst[base + 2 * cStride] = b * scale + bias
+                dst[base + 0 * cStride] = channels[writeOrder.0] * scale + bias
+                dst[base + 1 * cStride] = channels[writeOrder.1] * scale + bias
+                dst[base + 2 * cStride] = channels[writeOrder.2] * scale + bias
             }
         }
 
@@ -322,23 +515,131 @@ class FaceMatcher: ObservableObject {
 
     private var currentTask: Task<Void, Never>? = nil
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
-    private let embeddingModel: FaceEmbeddingModel?
-    private let modelLoadError: Error?
+    /// The active embedder. Marked `@Published` so the toolbar can show which
+    /// architecture is loaded and react when the user switches models.
+    @Published private(set) var embeddingModel: FaceEmbeddingModel? = nil
+    /// Which architectures are actually bundled with this build. Used by the
+    /// model picker UI to disable choices that aren't available so users
+    /// aren't offered options that would silently fail.
+    @Published private(set) var availableKinds: Set<FaceModelKind> = []
+    @Published private(set) var modelLoadError: Error? = nil
+
+    /// Convenience for SwiftUI bindings — current architecture, or `nil` if
+    /// nothing loaded.
+    var activeKind: FaceModelKind? { embeddingModel?.kind }
+
+    /// UserDefaults key for the user's chosen architecture. Persisted so the
+    /// picker remembers the choice between launches.
+    private static let preferredKindDefaultsKey = "FaceMatcher.preferredModelKind"
 
     private let maxScanImageDimension: Int = 2400
     private let uiPublishInterval: TimeInterval = 0.12
 
     init(modelNames: [String] = FaceEmbeddingModel.defaultModelNames) {
-        do {
-            self.embeddingModel = try FaceEmbeddingModel(modelNames: modelNames)
-            self.modelLoadError = nil
-        } catch {
-            self.embeddingModel = nil
-            self.modelLoadError = error
-            #if DEBUG
-            print("FaceNet model load failed: \(error.localizedDescription)")
-            #endif
+        // Probe the bundle to see which architectures the build actually ships
+        // with. This drives both the picker UI (so options aren't enabled when
+        // the file isn't there) and the load fallback chain below.
+        var available: Set<FaceModelKind> = []
+        if FaceEmbeddingModel.isAnyResourceBundled(names: FaceEmbeddingModel.adafaceModelNames) {
+            available.insert(.adaface)
         }
+        if FaceEmbeddingModel.isAnyResourceBundled(names: FaceEmbeddingModel.facenetModelNames) {
+            available.insert(.facenet)
+        }
+        self.availableKinds = available
+
+        // Load order: previously-chosen kind (if available) > AdaFace > FaceNet.
+        // Each branch falls through to the next on failure so an unconfigured
+        // build still works the same as before.
+        let savedKind = Self.loadSavedKind()
+        let loadOrder: [FaceModelKind]
+        switch savedKind {
+        case .some(let kind) where available.contains(kind):
+            loadOrder = [kind, .adaface, .facenet].uniqued()
+        default:
+            loadOrder = [.adaface, .facenet]
+        }
+
+        for kind in loadOrder {
+            do {
+                let model = try FaceEmbeddingModel(modelNames: Self.modelNames(for: kind) + modelNames)
+                self.embeddingModel = model
+                self.modelLoadError = nil
+                #if DEBUG
+                print("Face matcher using \(kind) model.")
+                #endif
+                return
+            } catch {
+                #if DEBUG
+                print("Could not load \(kind) model: \(error.localizedDescription)")
+                #endif
+                self.modelLoadError = error
+            }
+        }
+
+        // Nothing loaded — `embeddingModel` stays nil and the UI will surface
+        // `modelLoadError` from the last attempt.
+        self.embeddingModel = nil
+    }
+
+    /// Switch architectures at runtime. Used by the toolbar picker. Returns
+    /// `true` if the swap succeeded; on failure the existing model is kept so
+    /// the user can keep scanning while they fix the bundling issue.
+    @discardableResult
+    func selectModel(_ kind: FaceModelKind) -> Bool {
+        // No-op if it's already loaded — avoid the cost of recompiling the
+        // CoreML model just because the picker re-emitted the same value.
+        if embeddingModel?.kind == kind { return true }
+
+        do {
+            let model = try FaceEmbeddingModel(modelNames: Self.modelNames(for: kind))
+            DispatchQueue.main.async {
+                self.embeddingModel = model
+                self.modelLoadError = nil
+                self.statusText = "MODEL SET: \(kind.displayName.uppercased())"
+            }
+            Self.saveKind(kind)
+            #if DEBUG
+            print("Face matcher switched to \(kind) model.")
+            #endif
+            return true
+        } catch {
+            DispatchQueue.main.async {
+                self.modelLoadError = error
+                self.statusText = "ERROR: \(error.localizedDescription)"
+            }
+            #if DEBUG
+            print("Failed to switch to \(kind) model: \(error.localizedDescription)")
+            #endif
+            return false
+        }
+    }
+
+    private static func modelNames(for kind: FaceModelKind) -> [String] {
+        switch kind {
+        case .adaface: return FaceEmbeddingModel.adafaceModelNames
+        case .facenet: return FaceEmbeddingModel.facenetModelNames
+        }
+    }
+
+    private static func loadSavedKind() -> FaceModelKind? {
+        guard let raw = UserDefaults.standard.string(forKey: preferredKindDefaultsKey) else {
+            return nil
+        }
+        switch raw {
+        case "adaface": return .adaface
+        case "facenet": return .facenet
+        default: return nil
+        }
+    }
+
+    private static func saveKind(_ kind: FaceModelKind) {
+        let raw: String
+        switch kind {
+        case .adaface: raw = "adaface"
+        case .facenet: raw = "facenet"
+        }
+        UserDefaults.standard.set(raw, forKey: preferredKindDefaultsKey)
     }
 
     func cancel() {
@@ -366,7 +667,14 @@ class FaceMatcher: ObservableObject {
         }
     }
 
-    private func extractTargetFaceEmbedding(from nsImage: NSImage, using model: FaceEmbeddingModel) throws -> [Float] {
+    /// Extracts one or more anchor embeddings from the selfie. The match
+    /// pipeline scores each candidate face against every anchor and keeps the
+    /// best (max) similarity — this is the "multi-anchor" trick that helps
+    /// when the user's selfie was taken at a different angle/crop than the
+    /// party photos. For AdaFace we generate two anchors (landmark-aligned
+    /// and bounding-box-cropped); for FaceNet a single anchor is enough since
+    /// it was trained on loose crops anyway.
+    private func extractTargetFaceEmbeddings(from nsImage: NSImage, using model: FaceEmbeddingModel) throws -> [[Float]] {
         guard let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             throw FaceMatcherError.noFaceDetected
         }
@@ -378,11 +686,42 @@ class FaceMatcher: ObservableObject {
             throw FaceMatcherError.noFaceDetected
         }
 
-        guard let croppedFace = cropFace(from: cgImage, boundingBox: largestFace.boundingBox) else {
-            throw FaceMatcherError.noFaceDetected
+        var anchors: [[Float]] = []
+
+        // Up to two anchors for AdaFace, one for FaceNet. The match pipeline
+        // takes max similarity across all anchors, so more anchors only
+        // increases recall (at the cost of selfie-side setup time, which is
+        // a one-shot per scan).
+
+        // Anchor 1 (AdaFace, frontal selfies only): eye-pupil-aligned crop.
+        // The strongest anchor when available — matches AdaFace's training
+        // distribution. Skipped for profile selfies via the yaw gate inside
+        // `alignedFaceCrop`.
+        if model.kind == .adaface,
+           let alignedCrop = alignedFaceCrop(from: cgImage, observation: largestFace) {
+            if let embedding = try? model.embeddingWithTTA(from: alignedCrop) {
+                anchors.append(embedding)
+            }
         }
 
-        return try model.embedding(from: croppedFace)
+        // Anchor 2 (both): padded bounding-box crop. Always included — it's
+        // the universal anchor that matches photos where alignment failed
+        // (profile views) or where the user's selfie was itself a profile.
+        // TTA only applies when the selfie is frontal (same reasoning as the
+        // scan side).
+        let selfieIsProfile = isProfileFace(largestFace)
+        if let croppedFace = cropFace(from: cgImage, boundingBox: largestFace.boundingBox) {
+            let useTTA = model.kind == .adaface && !selfieIsProfile
+            let embedding = try (useTTA
+                ? model.embeddingWithTTA(from: croppedFace)
+                : model.embedding(from: croppedFace))
+            anchors.append(embedding)
+        }
+
+        guard !anchors.isEmpty else {
+            throw FaceMatcherError.noFaceDetected
+        }
+        return anchors
     }
 
     /// A cheap content fingerprint used to detect duplicate copies of the same
@@ -413,7 +752,7 @@ class FaceMatcher: ObservableObject {
             await MainActor.run {
                 self.isScanning = true
                 self.progress = 0.0
-                self.statusText = "LOADING FACENET RECOGNITION CORE..."
+                self.statusText = "LOADING FACE RECOGNITION CORE..."
                 self.matchedResults.removeAll()
                 // Reset any previous duration so the header doesn't display a
                 // stale "scanned in 12s" label while the new scan is in flight.
@@ -427,14 +766,14 @@ class FaceMatcher: ObservableObject {
             guard let embeddingModel = self.embeddingModel else {
                 await MainActor.run {
                     self.isScanning = false
-                    self.statusText = "ERROR: \(self.modelLoadError?.localizedDescription ?? "FACENET MODEL MISSING")"
+                    self.statusText = "ERROR: \(self.modelLoadError?.localizedDescription ?? "FACE MODEL MISSING")"
                 }
                 return
             }
 
-            let targetEmbedding: [Float]
+            let targetEmbeddings: [[Float]]
             do {
-                targetEmbedding = try self.extractTargetFaceEmbedding(from: selfieImage, using: embeddingModel)
+                targetEmbeddings = try self.extractTargetFaceEmbeddings(from: selfieImage, using: embeddingModel)
             } catch {
                 await MainActor.run {
                     self.isScanning = false
@@ -511,7 +850,7 @@ class FaceMatcher: ObservableObject {
                         guard let self = self else { return nil }
                         return await self.processFile(
                             fileURL: url,
-                            targetEmbedding: targetEmbedding,
+                            targetEmbeddings: targetEmbeddings,
                             embeddingModel: embeddingModel,
                             minimumSimilarity: minimumSimilarity
                         )
@@ -586,8 +925,8 @@ class FaceMatcher: ObservableObject {
                     self.hasScanned = true
                     self.lastScanDuration = scanDuration
                     self.statusText = totalFound == 0
-                        ? "FACENET SCAN FINISHED: NO LOCAL RESULTS"
-                        : "FACENET SCAN COMPLETE: \(totalFound) TARGETS FOUND"
+                        ? "SCAN FINISHED: NO LOCAL RESULTS"
+                        : "SCAN COMPLETE: \(totalFound) TARGETS FOUND"
                 }
             }
         }
@@ -598,7 +937,7 @@ class FaceMatcher: ObservableObject {
 
     private func processFile(
         fileURL: URL,
-        targetEmbedding: [Float],
+        targetEmbeddings: [[Float]],
         embeddingModel: FaceEmbeddingModel,
         minimumSimilarity: Float
     ) async -> MatchResult? {
@@ -618,11 +957,44 @@ class FaceMatcher: ObservableObject {
             var bestFaceBox: CGRect? = nil
             for face in usableFaces {
                 if Task.isCancelled { return nil }
-                guard let croppedFace = cropFace(from: cgImage, boundingBox: face.boundingBox) else {
-                    continue
+
+                // AdaFace crop strategy: eye-pupil alignment for frontal/3-
+                // quarter faces, loose bounding-box crop for profile faces
+                // (where eye alignment is unreliable because one pupil is
+                // occluded). The yaw check inside `alignedFaceCrop` returns
+                // nil on profiles so the `??` falls through. FaceNet always
+                // takes the loose crop — it was trained that way.
+                let preparedCrop: CGImage?
+                if embeddingModel.kind == .adaface {
+                    preparedCrop = alignedFaceCrop(from: cgImage, observation: face)
+                        ?? cropFace(from: cgImage, boundingBox: face.boundingBox)
+                } else {
+                    preparedCrop = cropFace(from: cgImage, boundingBox: face.boundingBox)
                 }
-                let candidateEmbedding = try embeddingModel.embedding(from: croppedFace)
-                let similarity = cosineSimilarity(candidateEmbedding, targetEmbedding)
+                guard let croppedFace = preparedCrop else { continue }
+
+                // TTA averages the original embedding with its horizontal flip.
+                // For *frontal* faces that's a free accuracy boost (the model
+                // is flip-equivariant, so the two embeddings should agree).
+                // For *profile* faces it averages a left-facing view with a
+                // right-facing one — two different views of the same person —
+                // producing a chimera embedding that matches neither. So we
+                // gate TTA off on profiles.
+                let useTTA = embeddingModel.kind == .adaface && !isProfileFace(face)
+                let candidateEmbedding = useTTA
+                    ? try embeddingModel.embeddingWithTTA(from: croppedFace)
+                    : try embeddingModel.embedding(from: croppedFace)
+
+                // Multi-anchor: score against every selfie anchor and take
+                // the max. The target person's true embedding only has to be
+                // close to *one* of our anchors to count as a match — this
+                // dramatically improves recall for selfies that don't match
+                // the crop style of the photos being scanned.
+                var similarity: Float = -1.0
+                for anchor in targetEmbeddings {
+                    let score = cosineSimilarity(candidateEmbedding, anchor)
+                    if score > similarity { similarity = score }
+                }
 
                 #if DEBUG
                 print("Score: \(similarity) - File: \(fileURL.lastPathComponent)")
@@ -635,7 +1007,12 @@ class FaceMatcher: ObservableObject {
                     // which person in a group shot was matched.
                     bestFaceBox = face.boundingBox
                 }
-                if bestSimilarity >= 0.985 { break }
+                // Early-out at "definitely the same person" so we don't keep
+                // scoring more faces in a busy group shot once we've found a
+                // strong match. The threshold is per-architecture: AdaFace's
+                // distribution tops out lower than FaceNet's.
+                let earlyOut: Float = embeddingModel.kind == .adaface ? 0.85 : 0.985
+                if bestSimilarity >= earlyOut { break }
             }
 
             if bestSimilarity >= minimumSimilarity {
@@ -645,7 +1022,7 @@ class FaceMatcher: ObservableObject {
                 return MatchResult(
                     fileURL: fileURL,
                     faceCount: totalPeopleInPhoto,
-                    similarity: Self.displayConfidence(from: bestSimilarity),
+                    similarity: displayConfidence(from: bestSimilarity),
                     faceBoundingBox: bestFaceBox
                 )
             }
@@ -673,29 +1050,181 @@ class FaceMatcher: ObservableObject {
         return CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary)
     }
 
+    /// Vision face detection. When AdaFace is loaded we ask for landmarks
+    /// too — eye/nose/mouth points feed the alignment step in
+    /// `alignedFaceCrop`. FaceNet doesn't benefit from alignment (it was
+    /// trained on loose bounding-box crops, not MTCNN-aligned ones), so the
+    /// faster `VNDetectFaceRectanglesRequest` is used as a small optimization.
     private func detectFaces(in cgImage: CGImage) throws -> [VNFaceObservation] {
         let requestHandler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        let request = VNDetectFaceRectanglesRequest()
-        if #available(macOS 11.0, *) {
-            request.revision = VNDetectFaceRectanglesRequestRevision3
+        let wantLandmarks = embeddingModel?.kind == .adaface
+
+        if wantLandmarks {
+            let request = VNDetectFaceLandmarksRequest()
+            if #available(macOS 11.0, *) {
+                request.revision = VNDetectFaceLandmarksRequestRevision3
+            }
+            try requestHandler.perform([request])
+            return request.results ?? []
+        } else {
+            let request = VNDetectFaceRectanglesRequest()
+            if #available(macOS 11.0, *) {
+                request.revision = VNDetectFaceRectanglesRequestRevision3
+            }
+            try requestHandler.perform([request])
+            return request.results ?? []
         }
-        try requestHandler.perform([request])
-        return request.results ?? []
     }
 
     private func isUsableFace(_ face: VNFaceObservation, in cgImage: CGImage) -> Bool {
-        // Slightly looser confidence threshold — Vision rates partial-profile
-        // and side-lit faces lower, and we don't want to drop them before
-        // FaceNet even gets a look.
-        guard face.confidence >= 0.55 else { return false }
+        // Confidence floor 0.40 — lowered from 0.55 so we don't reject
+        // profile faces before the embedder gets a look. Vision rates
+        // profile and partial-profile faces meaningfully lower (often 0.45-
+        // 0.65) because the classifier was trained on frontal data; staying
+        // tight here was systematically dropping side-angle shots. Anything
+        // below 0.40 tends to be a textured object misfiring as a face, so
+        // we don't go lower.
+        guard face.confidence >= 0.40 else { return false }
 
         let rect = VNImageRectForNormalizedRect(face.boundingBox, cgImage.width, cgImage.height)
-        // 36×36px minimum — below this FaceNet's 160×160 input upscale loses
-        // too much detail to be reliable, but anything larger should be
-        // given a chance even at the back of a group shot.
-        guard rect.width >= 36, rect.height >= 36 else { return false }
+        // 28×28px minimum (was 36) — profile faces have narrower bounding
+        // boxes than frontal faces of the same person because only half the
+        // face is visible. A 28px-wide profile is roughly equivalent to a
+        // 36px-wide frontal face in terms of detail content.
+        guard rect.width >= 28, rect.height >= 28 else { return false }
 
         return true
+    }
+
+    /// Threshold above which a face is treated as "profile" (in radians,
+    /// matching Vision's yaw units). 0.4 rad ≈ 23° — at this angle one eye
+    /// starts becoming unreliable as a landmark and the canonical 5-point
+    /// template stops being a good match for the face's actual geometry.
+    /// Empirically chosen: 0.4 catches clear profile shots while leaving
+    /// 3-quarter views (which DO benefit from eye alignment) on the eye-
+    /// aligned path.
+    private static let profileYawThreshold: CGFloat = 0.4
+
+    /// True if Vision considers this face a profile view. Profile faces
+    /// take a different alignment path (loose crop, no TTA) because eye-
+    /// alignment and mirror-augmentation both assume frontal symmetry.
+    private func isProfileFace(_ observation: VNFaceObservation) -> Bool {
+        guard let yaw = observation.yaw else { return false }
+        return abs(CGFloat(yaw.doubleValue)) >= Self.profileYawThreshold
+    }
+
+    /// AdaFace was trained on MTCNN-aligned 112×112 crops with a specific
+    /// canonical position for eyes/nose/mouth (the "InsightFace template").
+    /// Loose bounding-box crops have eye positions that wander by 20+ pixels,
+    /// which puts the network well off-distribution and tanks accuracy on
+    /// frontal/3-quarter views. This function uses Vision's eye-pupil
+    /// landmarks to compute a similarity transform (rotation + uniform
+    /// scale + translation) that maps the detected face onto the canonical
+    /// template, then renders a 112×112 aligned crop.
+    ///
+    /// Returns `nil` for profile faces (|yaw| ≥ ~23°). On a profile, Vision
+    /// still returns *some* coordinate for the occluded pupil — usually a
+    /// best-guess that's wildly wrong — so this function would otherwise
+    /// "succeed" with garbage alignment. Caller falls back to a loose
+    /// bounding-box crop for profiles, which is closer to what the model
+    /// actually saw of profile faces during training (rare, but present).
+    ///
+    /// We use 2-point alignment (eyes only) rather than the textbook 5-point
+    /// Umeyama similarity transform. The 2-point version handles rotation +
+    /// scale + translation but ignores the nose/mouth points, which costs
+    /// roughly 1-2% recall vs. 5-point. The win is that it's ~30 lines instead
+    /// of ~100, doesn't need a linear algebra dependency, and the dominant
+    /// AdaFace gain over loose crops comes from getting the eyes in the right
+    /// place anyway.
+    private func alignedFaceCrop(
+        from cgImage: CGImage,
+        observation: VNFaceObservation,
+        outputSize: Int = 112
+    ) -> CGImage? {
+        // Bail on profile faces — landmark positions for the occluded eye
+        // are unreliable and produce worse crops than skipping alignment.
+        if isProfileFace(observation) { return nil }
+
+        guard let landmarks = observation.landmarks,
+              let leftPupilRegion = landmarks.leftPupil,
+              let rightPupilRegion = landmarks.rightPupil,
+              let leftPupilNorm = leftPupilRegion.normalizedPoints.first,
+              let rightPupilNorm = rightPupilRegion.normalizedPoints.first else {
+            return nil
+        }
+
+        // Vision returns landmarks in face-bounding-box-normalized coords
+        // with bottom-left origin. CIImage's coordinate system is also
+        // bottom-left origin, so once we convert landmark coords to absolute
+        // pixel positions in CIImage space we don't need to flip Y.
+        let imageWidth = CGFloat(cgImage.width)
+        let imageHeight = CGFloat(cgImage.height)
+        let bbInPixels = VNImageRectForNormalizedRect(observation.boundingBox,
+                                                      cgImage.width,
+                                                      cgImage.height)
+
+        // Vision's `boundingBox` is in bottom-left normalized image coords —
+        // `VNImageRectForNormalizedRect` converts to pixels but keeps origin
+        // at bottom-left. CIImage uses the same convention, so this rect can
+        // feed into CIImage space directly.
+        _ = imageHeight  // silence warning if Y-flip becomes needed later
+        _ = imageWidth
+
+        let leftEye = CGPoint(
+            x: bbInPixels.minX + leftPupilNorm.x * bbInPixels.width,
+            y: bbInPixels.minY + leftPupilNorm.y * bbInPixels.height
+        )
+        let rightEye = CGPoint(
+            x: bbInPixels.minX + rightPupilNorm.x * bbInPixels.width,
+            y: bbInPixels.minY + rightPupilNorm.y * bbInPixels.height
+        )
+
+        // Canonical InsightFace 5-point template, eyes only. The template
+        // uses top-left origin in 112×112 space — we convert to bottom-left
+        // here so it matches CIImage's coordinate system.
+        let templateLeftEyeTL = CGPoint(x: 38.2946, y: 51.6963)
+        let templateRightEyeTL = CGPoint(x: 73.5318, y: 51.5014)
+        let canonical = CGFloat(outputSize)
+        let templateLeftEye = CGPoint(x: templateLeftEyeTL.x,
+                                      y: canonical - templateLeftEyeTL.y)
+        let templateRightEye = CGPoint(x: templateRightEyeTL.x,
+                                       y: canonical - templateRightEyeTL.y)
+
+        // Compute the similarity transform: rotate so the eye line is
+        // horizontal, scale so the inter-pupil distance matches the template,
+        // translate so the eye midpoint lands on the template midpoint.
+        let dx = rightEye.x - leftEye.x
+        let dy = rightEye.y - leftEye.y
+        let eyeDistance = max(hypot(dx, dy), 1.0)
+        let angle = atan2(dy, dx)
+        let templateDx = templateRightEye.x - templateLeftEye.x
+        let templateDy = templateRightEye.y - templateLeftEye.y
+        let templateEyeDistance = max(hypot(templateDx, templateDy), 1.0)
+        let scale = templateEyeDistance / eyeDistance
+
+        let eyeMidpoint = CGPoint(x: (leftEye.x + rightEye.x) / 2,
+                                  y: (leftEye.y + rightEye.y) / 2)
+        let templateMidpoint = CGPoint(x: (templateLeftEye.x + templateRightEye.x) / 2,
+                                       y: (templateLeftEye.y + templateRightEye.y) / 2)
+
+        // Build the affine: translate eye-midpoint to origin → rotate by
+        // -angle → uniform scale → translate to template midpoint. Compose
+        // by post-multiplying so applying to a point runs in declaration
+        // order (translate to origin, then rotate, then scale, then translate
+        // to canonical).
+        var transform = CGAffineTransform.identity
+        transform = transform.translatedBy(x: templateMidpoint.x, y: templateMidpoint.y)
+        transform = transform.scaledBy(x: scale, y: scale)
+        transform = transform.rotated(by: -angle)
+        transform = transform.translatedBy(x: -eyeMidpoint.x, y: -eyeMidpoint.y)
+
+        let ciImage = CIImage(cgImage: cgImage).transformed(by: transform)
+        let cropRect = CGRect(x: 0, y: 0, width: outputSize, height: outputSize)
+
+        // Render explicitly to a small RGB context — `createCGImage(from:)`
+        // honors the rect we ask for, producing a 112×112 aligned image even
+        // if the transformed CIImage has a much larger extent.
+        return ciContext.createCGImage(ciImage, from: cropRect)
     }
 
     private func cropFace(from cgImage: CGImage, boundingBox: CGRect) -> CGImage? {
@@ -748,50 +1277,90 @@ class FaceMatcher: ObservableObject {
 
     // MARK: - Confidence scaling
     //
-    // FaceNet cosine similarity has a narrow useful band: roughly 0.55 is the
-    // noise floor where two *different* human faces tend to land, and 0.95+
-    // is the regime where you can be confident two crops are the same person.
-    // Showing the raw 0.0–1.0 value directly was misleading — a "62% match"
-    // displayed as a percentage feels meaningful, but in cosine space it's
-    // essentially "this is some human face." We remap that 0.55–0.95 band
-    // onto the user-facing 0–100% confidence scale so both the strictness
-    // slider and displayed match scores correspond to the user's intuition.
+    // Cosine similarity has a narrow useful band, and the band differs by
+    // architecture. The user-facing "strictness" slider maps 0..1 onto that
+    // band so the same slider position means the same thing visually
+    // regardless of which model loaded. Raw cosine is never shown.
+    //
+    // FaceNet (Inception ResNet, 160×160 RGB): same-person crops typically
+    // score 0.55–0.95, different people 0.20–0.45. Band: 0.45–0.80.
+    //
+    // AdaFace / ArcFace (IResNet, 112×112 BGR): different distribution —
+    // same person 0.30–0.65, different people clustered near 0. AdaFace is
+    // more discriminative so the same slider position can be tighter; we
+    // use 0.18–0.55, where 0.18 reaches tough side-angle pairs and 0.55+ is
+    // essentially "same person."
 
-    /// Lower bound of the useful FaceNet cosine band. Set below the typical
-    /// noise floor so the slider's loose end reaches real matches in tough
-    /// conditions (side angle, harsh lighting, user in back of a group),
-    /// whose genuine same-person scores can dip into 0.55–0.65.
-    static let cosineFloor: Float = 0.45
-    /// Upper bound — at or above this we treat the match as essentially certain.
-    /// Deliberately tight (0.80) so real same-person matches at cosine
-    /// 0.65–0.75 — the common range for varied real-world photos — land in
-    /// the 50–85% displayed range and feel like confident matches rather
-    /// than weak ones.
-    static let cosineCeiling: Float = 0.80
+    /// Lower bound of the useful FaceNet cosine band.
+    static let facenetCosineFloor: Float = 0.45
+    /// Upper bound — at or above this a FaceNet match is essentially certain.
+    static let facenetCosineCeiling: Float = 0.80
+
+    /// Lower bound of the useful AdaFace cosine band. Set at 0.12 — high
+    /// enough that impostor pairs (which AdaFace pushes near 0.00 but with
+    /// a noisy tail into 0.05-0.10) stay below the slider's loose end, low
+    /// enough that genuine same-person pairs at side angles or uneven
+    /// lighting still surface. Earlier values: 0.05 (too low, admitted
+    /// impostor noise) and 0.18 (too high, rejected real profile matches).
+    static let adafaceCosineFloor: Float = 0.12
+    /// Upper bound — AdaFace at 0.50+ is essentially certain.
+    static let adafaceCosineCeiling: Float = 0.50
 
     /// Maximum value the displayed confidence can reach. Capped below 100%
     /// because face matching is never truly certain — claiming a perfect
     /// match would overstate what the model actually knows.
     static let displayCeiling: Double = 0.95
 
+    /// Returns the cosine band (`floor`, `ceiling`) for the currently loaded
+    /// model. Falls back to FaceNet's band when no model is loaded so the UI
+    /// can still render a sensible strictness slider before scanning.
+    private var cosineBand: (floor: Float, ceiling: Float) {
+        Self.cosineBand(for: embeddingModel?.kind ?? .facenet)
+    }
+
+    static func cosineBand(for kind: FaceModelKind) -> (floor: Float, ceiling: Float) {
+        switch kind {
+        case .facenet: return (facenetCosineFloor, facenetCosineCeiling)
+        case .adaface: return (adafaceCosineFloor, adafaceCosineCeiling)
+        }
+    }
+
     /// Maps a raw cosine similarity onto the user-facing confidence scale.
     /// Floor maps to 0%, ceiling maps to `displayCeiling` (95%), and very
     /// strong matches above the ceiling are clamped to that same 95% — we
     /// never display 100%.
+    func displayConfidence(from cosine: Float) -> Double {
+        let band = cosineBand
+        let clamped = max(band.floor, min(band.ceiling, cosine))
+        let normalized = Double((clamped - band.floor) / (band.ceiling - band.floor))
+        return min(normalized, Self.displayCeiling)
+    }
+
+    /// Static variant for call sites that don't have a `FaceMatcher` instance
+    /// (e.g. SwiftUI previews). Assumes the FaceNet band for back-compat.
     static func displayConfidence(from cosine: Float) -> Double {
-        let clamped = max(cosineFloor, min(cosineCeiling, cosine))
-        let normalized = Double((clamped - cosineFloor) / (cosineCeiling - cosineFloor))
+        let band = cosineBand(for: .facenet)
+        let clamped = max(band.floor, min(band.ceiling, cosine))
+        let normalized = Double((clamped - band.floor) / (band.ceiling - band.floor))
         return min(normalized, displayCeiling)
     }
 
     /// Inverse of `displayConfidence` — maps the slider position (0..1 in
     /// confidence units) back to the raw cosine cutoff used for filtering.
-    static func cosineCutoff(forConfidence strictness: Double) -> Float {
+    func cosineCutoff(forConfidence strictness: Double) -> Float {
+        let band = cosineBand
         let clamped = Float(max(0.0, min(1.0, strictness)))
-        return cosineFloor + clamped * (cosineCeiling - cosineFloor)
+        return band.floor + clamped * (band.ceiling - band.floor)
+    }
+
+    /// Back-compat static variant — assumes the FaceNet band.
+    static func cosineCutoff(forConfidence strictness: Double) -> Float {
+        let band = cosineBand(for: .facenet)
+        let clamped = Float(max(0.0, min(1.0, strictness)))
+        return band.floor + clamped * (band.ceiling - band.floor)
     }
 
     private func minimumCosineSimilarity(for strictness: Double) -> Float {
-        Self.cosineCutoff(forConfidence: strictness)
+        cosineCutoff(forConfidence: strictness)
     }
 }
