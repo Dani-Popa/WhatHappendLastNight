@@ -552,18 +552,18 @@ private struct ModelPickerButton: View {
                     .opacity(0.7)
             }
             .foregroundColor(Tokens.textSecondary)
-            .padding(.horizontal, Space.m)
-            .frame(height: 32)
-            .background(isHovered ? Tokens.surfaceElevated : Tokens.surface)
-            .clipShape(RoundedRectangle(cornerRadius: Radius.m))
-            .overlay(
-                RoundedRectangle(cornerRadius: Radius.m)
-                    .stroke(Tokens.border, lineWidth: 1)
-            )
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
+        .padding(.horizontal, Space.m)
+        .frame(height: 32)
+        .background(isHovered ? Tokens.surfaceElevated : Tokens.surface)
+        .clipShape(RoundedRectangle(cornerRadius: Radius.m))
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.m)
+                .stroke(Tokens.border, lineWidth: 1)
+        )
         .onHover { isHovered = $0 }
         .help("Face recognition model: \(label)")
         .accessibilityLabel("Face recognition model")

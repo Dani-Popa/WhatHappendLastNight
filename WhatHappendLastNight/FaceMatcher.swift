@@ -65,6 +65,148 @@ private enum FaceMatcherError: LocalizedError {
     }
 }
 
+/// How a model's similarity scores get mapped onto the 0..1 confidence scale
+/// the UI shows. All three curves preserve the cross-model UX invariant:
+///   slider 70% notch == confidence 70% == calibrated same/different boundary.
+/// Only the *shape* of the approach to that anchor differs.
+///
+/// - linear:    c = (sim - floor) / (ceiling - floor)
+/// - sigmoid:   three-anchor logistic centered at the knee, piecewise-rescaled
+///              so (floor, knee, ceiling) -> (0, 0.70, 1). Steepest gradient
+///              where decisions are closest; saturates clearly-good/bad.
+/// - piecewise: two linear segments joined at the knee, mapped to
+///              (floor, knee, ceiling) -> (0, 0.70, 1). Designed for models
+///              whose same-person distribution has a heavy upper tail
+///              (legacy triplet-loss FaceNet6).
+enum ConfidenceCurve {
+    case linear
+    case sigmoid(k: Float)   // steepness in band-width units (default 8)
+    case piecewise
+}
+
+/// Bundle of everything that depends only on the model architecture. One
+/// strategy per kind, looked up via `FaceModelKind.strategy` — replaces the
+/// dozen-or-so `switch kind` ladders that used to be scattered through this
+/// file. Adding a new model means adding one enum case and one strategy
+/// literal, not editing eight call sites.
+struct FaceModelStrategy {
+    // ---- preprocessing -----------------------------------------------------
+    let pixelScale: Float
+    let pixelBias: Float
+    let useBGRChannelOrder: Bool
+    let fallbackImageSize: Int
+    let alignedCropSize: Int
+    let cropPadding: CGFloat
+    let cropVerticalShift: CGFloat
+
+    // ---- matching ---------------------------------------------------------
+    let wantsLandmarks: Bool          // Vision: landmarks request vs rect-only
+    let wantsAlignment: Bool          // similarity-transform crop, not bbox
+    let wantsTTA: Bool                // horizontal-flip averaging
+    let earlyOut: Float               // "definitely same person" short-circuit
+
+    // ---- thresholding + UI -------------------------------------------------
+    let cosineFloor: Float
+    let cosineCeiling: Float
+    let confidenceCurve: ConfidenceCurve
+
+    // ---- presentation ------------------------------------------------------
+    let displayName: String
+    let blurb: String
+    let sfSymbol: String
+
+    var cosineBand: (floor: Float, ceiling: Float) { (cosineFloor, cosineCeiling) }
+    /// The cosine value the slider's 70% notch resolves to. Per calibration
+    /// notes this is each model's empirical same/different boundary.
+    var cosineKnee: Float {
+        cosineFloor + FaceMatcher.recommendedSliderFraction * (cosineCeiling - cosineFloor)
+    }
+
+    /// Map a raw cosine similarity to a 0..1 confidence under this strategy's
+    /// curve. All three curves are anchored so (floor, knee, ceiling) maps to
+    /// (0, 0.70, 1) — the cross-model UX invariant the slider depends on.
+    func confidence(fromCosine sim: Float) -> Float {
+        let span = max(cosineCeiling - cosineFloor, 1e-6)
+        let knee = cosineKnee
+
+        switch confidenceCurve {
+        case .linear:
+            let c = (sim - cosineFloor) / span
+            return max(0, min(1, c))
+
+        case .sigmoid(let k):
+            // Logistic centered at the knee so gradient is steepest where
+            // decisions matter; output is piecewise-rescaled through the
+            // three anchors so the knee lands at exactly 0.70.
+            let kk = k / span
+            let sig: (Float) -> Float = { x in 1.0 / (1.0 + exp(-kk * (x - knee))) }
+            let r = sig(sim), rF = sig(cosineFloor), rK = sig(knee), rC = sig(cosineCeiling)
+            let c: Float
+            if sim <= knee {
+                c = 0.70 * (r - rF) / max(rK - rF, 1e-9)
+            } else {
+                c = 0.70 + 0.30 * (r - rK) / max(rC - rK, 1e-9)
+            }
+            return max(0, min(1, c))
+
+        case .piecewise:
+            // Two linear segments stitched at the knee. The upper segment
+            // uses the remaining headroom for "definitely same person"
+            // matches — important for legacy FaceNet6 which routinely hits
+            // 0.90+ on clean pairs (a pure linear map would clamp all clean
+            // matches to the cap and waste the upper half of the slider).
+            if sim <= cosineFloor { return 0 }
+            if sim >= cosineCeiling { return 1 }
+            if sim <= knee {
+                return 0.70 * (sim - cosineFloor) / max(knee - cosineFloor, 1e-9)
+            } else {
+                return 0.70 + 0.30 * (sim - knee) / max(cosineCeiling - knee, 1e-9)
+            }
+        }
+    }
+
+    /// Inverse of `confidence(fromCosine:)` for the slider-cutoff path. Given
+    /// a strictness value in [0,1] (the slider's confidence units), returns
+    /// the cosine cutoff the match decision should compare against. All
+    /// three curves keep `strictness=0.70 -> knee` exactly, so the user-facing
+    /// slider behaves identically across models.
+    func cosineCutoff(forConfidence strictness: Float) -> Float {
+        let s = max(0, min(1, strictness))
+        let span = cosineCeiling - cosineFloor
+        let knee = cosineKnee
+        switch confidenceCurve {
+        case .linear:
+            return cosineFloor + s * span
+        case .piecewise:
+            // Inverse of the two-segment map.
+            if s <= 0.70 {
+                return cosineFloor + (s / 0.70) * (knee - cosineFloor)
+            } else {
+                return knee + ((s - 0.70) / 0.30) * (cosineCeiling - knee)
+            }
+        case .sigmoid(let k):
+            // Inverse of the three-anchor logistic. We need to invert
+            //     c = 0.70 * (sig(t) - rF) / (rK - rF)            for t <= knee
+            //     c = 0.70 + 0.30*(sig(t) - rK)/(rC - rK)          for t > knee
+            // where sig(x) = 1 / (1 + exp(-k/span * (x - knee))).
+            let kk = k / max(span, 1e-6)
+            let sig: (Float) -> Float = { x in 1.0 / (1.0 + exp(-kk * (x - knee))) }
+            let rF = sig(cosineFloor), rK = sig(knee), rC = sig(cosineCeiling)
+            let target: Float
+            if s <= 0.70 {
+                target = rF + (s / 0.70) * (rK - rF)
+            } else {
+                target = rK + ((s - 0.70) / 0.30) * (rC - rK)
+            }
+            // Invert the logistic, then clamp to the calibrated band so a
+            // rounding error can never push the decision outside it.
+            let clamped = max(min(target, 1.0 - 1e-6), 1e-6)
+            let t = knee + log(clamped / (1.0 - clamped)) / kk
+            return max(cosineFloor, min(cosineCeiling, t))
+        }
+    }
+}
+
 /// Which face recognition architecture is loaded. Preprocessing, channel
 /// order, and the useful cosine band all differ between FaceNet (Inception
 /// ResNet, 160×160 RGB, [-1,1]) and AdaFace (IResNet, 112×112 BGR, [-1,1]).
@@ -103,42 +245,115 @@ enum FaceModelKind {
         return .facenet
     }
 
-    /// FaceNet's TF-style preprocessing — `(x - 127.5) / 128` — vs. AdaFace's
-    /// PyTorch-style `(x - 127.5) / 127.5`. Functionally close, but using the
-    /// exact training-time normalization noticeably improves cosine scores.
-    var pixelScale: Float {
+    /// Single source of truth for every per-kind parameter. Every other
+    /// computed property on this enum reads off the strategy — adding a new
+    /// model means appending one strategy literal, not editing each getter.
+    var strategy: FaceModelStrategy {
         switch self {
-        case .facenet, .facenet512: return 1.0 / 128.0
-        case .adaface: return 1.0 / 127.5
+        case .adaface:
+            // AdaFace IR-18 (ArcFace lineage). 112×112 BGR, (x/127.5)-1
+            // matches PyTorch training. 5-point aligned crops live closest
+            // to the training distribution. Sigmoid confidence: the band is
+            // narrow (0.30 wide) and impostor/genuine modes are sharply
+            // separated, so a logistic curve gives the most informative UI.
+            // Early-out at 0.85 — AdaFace tops out around 0.85 even on
+            // near-identical crops, so anything above that is "definitely
+            // the same person" and not worth scoring more candidates for.
+            return FaceModelStrategy(
+                pixelScale: 1.0 / 127.5,
+                pixelBias: -1.0,
+                useBGRChannelOrder: true,
+                fallbackImageSize: 112,
+                alignedCropSize: 112,
+                cropPadding: 1.20,
+                cropVerticalShift: 0.06,
+                wantsLandmarks: true,
+                wantsAlignment: true,
+                wantsTTA: true,
+                earlyOut: 0.85,
+                cosineFloor: FaceMatcher.adafaceCosineFloor,
+                cosineCeiling: FaceMatcher.adafaceCosineCeiling,
+                confidenceCurve: .sigmoid(k: 8.0),
+                displayName: "AdaFace",
+                blurb: "IResNet IR18 · 112×112 · recommended",
+                sfSymbol: "person.crop.square.badge.checkmark")
+        case .facenet512:
+            // Sandberg VGGFace2 checkpoint. 160×160 RGB, (x-127.5)/128 TF
+            // preprocessing. MTCNN-aligned crops with ~32px margin (≈1.30x
+            // bbox). Sigmoid for the same reason as AdaFace — narrow band
+            // around the calibrated 0.61 knee. Early-out at 0.70 because
+            // the Sandberg checkpoint rarely exceeds 0.75 even on the
+            // same-person frontal pair.
+            return FaceModelStrategy(
+                pixelScale: 1.0 / 128.0,
+                pixelBias: -127.5 / 128.0,
+                useBGRChannelOrder: false,
+                fallbackImageSize: 160,
+                alignedCropSize: 160,
+                cropPadding: 1.30,
+                cropVerticalShift: 0.08,
+                wantsLandmarks: true,
+                wantsAlignment: true,
+                wantsTTA: true,
+                earlyOut: 0.70,
+                cosineFloor: FaceMatcher.facenet512CosineFloor,
+                cosineCeiling: FaceMatcher.facenet512CosineCeiling,
+                confidenceCurve: .sigmoid(k: 8.0),
+                displayName: "FaceNet 512",
+                blurb: "VGGFace2 · 160×160 · 512-d (Sandberg)",
+                sfSymbol: "person.crop.square.filled.and.at.rectangle")
+        case .facenet:
+            // Legacy Facenet6 triplet-loss model. 160×160 RGB, loose
+            // 1.50x bbox crops with no alignment (trained that way). No
+            // TTA — the triplet loss already produces near flip-invariant
+            // embeddings and averaging adds no information. Piecewise
+            // confidence curve: this model routinely hits 0.90+ on clean
+            // same-person pairs, so a linear map across (0.45, 0.75) would
+            // clamp every clean match to the cap and waste the upper half
+            // of the slider's resolution. Early-out at 0.985 because the
+            // model's clean-match mass really does live near 1.
+            return FaceModelStrategy(
+                pixelScale: 1.0 / 128.0,
+                pixelBias: -127.5 / 128.0,
+                useBGRChannelOrder: false,
+                fallbackImageSize: 160,
+                alignedCropSize: 160,
+                cropPadding: 1.50,
+                cropVerticalShift: 0.12,
+                wantsLandmarks: false,
+                wantsAlignment: false,
+                wantsTTA: false,
+                earlyOut: 0.985,
+                cosineFloor: FaceMatcher.facenetCosineFloor,
+                cosineCeiling: FaceMatcher.facenetCosineCeiling,
+                confidenceCurve: .piecewise,
+                displayName: "FaceNet",
+                blurb: "Inception ResNet · 160×160 · legacy",
+                sfSymbol: "person.crop.square")
         }
     }
 
-    var pixelBias: Float {
-        switch self {
-        case .facenet, .facenet512: return -127.5 / 128.0
-        case .adaface: return -1.0
-        }
-    }
+    // ---- thin pass-throughs to keep the public surface stable -------------
+    // Existing callers (ContentView, Theme, this file) read these directly.
+    // Each one defers to the strategy so adding a new knob means touching one
+    // strategy literal, not editing the enum.
+
+    /// FaceNet's TF-style preprocessing — `(x - 127.5) / 128` — vs. AdaFace's
+    /// PyTorch-style `(x - 127.5) / 127.5`. Functionally close, but using the
+    /// exact training-time normalization noticeably improves cosine scores.
+    var pixelScale: Float { strategy.pixelScale }
+
+    var pixelBias: Float { strategy.pixelBias }
 
     /// AdaFace was trained on BGR-ordered crops (ArcFace lineage); FaceNet on
     /// RGB. Getting this wrong silently halves the model's accuracy — the
     /// network still produces an embedding, just a worse one — so it's worth
     /// being explicit here.
-    var useBGRChannelOrder: Bool {
-        switch self {
-        case .facenet, .facenet512: return false
-        case .adaface: return true
-        }
-    }
+    var useBGRChannelOrder: Bool { strategy.useBGRChannelOrder }
 
     /// Fallback input size if the model description doesn't expose one.
     /// FaceNet ships at 160; AdaFace/ArcFace IResNet variants at 112.
-    var fallbackImageSize: Int {
-        switch self {
-        case .facenet, .facenet512: return 160
-        case .adaface: return 112
-        }
-    }
+    var fallbackImageSize: Int { strategy.fallbackImageSize }
 
     /// Padding multiplier applied to the detected face bounding box when
     /// producing a loose square crop. The optimal value depends on what the
@@ -153,26 +368,14 @@ enum FaceModelKind {
     ///   the original 1.50x padding matches its training distribution.
     /// Wrong padding silently degrades cosine scores — the network still
     /// embeds, just on a frame that doesn't match what it saw in training.
-    var cropPadding: CGFloat {
-        switch self {
-        case .adaface:    return 1.20
-        case .facenet512: return 1.30
-        case .facenet:    return 1.50
-        }
-    }
+    var cropPadding: CGFloat { strategy.cropPadding }
 
     /// Fraction of the bounding-box height by which the crop center is shifted
     /// upward, to include more forehead and less neck. Tuned per model:
     /// - Tight AdaFace crops lose the chin if shifted much, so 6%.
     /// - FaceNet512's MTCNN training distribution sits roughly centered, 8%.
     /// - Facenet6's loose training crops tended to sit lower, leave at 12%.
-    var cropVerticalShift: CGFloat {
-        switch self {
-        case .adaface:    return 0.06
-        case .facenet512: return 0.08
-        case .facenet:    return 0.12
-        }
-    }
+    var cropVerticalShift: CGFloat { strategy.cropVerticalShift }
 
     /// Side length the aligned crop should be rendered at. We render at the
     /// network's native input size so the embedder doesn't re-resample.
@@ -180,40 +383,17 @@ enum FaceModelKind {
     /// 112-pixel aligned crop and then upscaling to 160 inside the embedder
     /// loses ~22% of pixel area to interpolation, which measurably degrades
     /// the embedding on FaceNet512.
-    var alignedCropSize: Int {
-        switch self {
-        case .adaface:    return 112
-        case .facenet, .facenet512: return 160
-        }
-    }
+    var alignedCropSize: Int { strategy.alignedCropSize }
 
     /// Short, user-facing label shown in the toolbar picker.
-    var displayName: String {
-        switch self {
-        case .facenet: return "FaceNet"
-        case .adaface: return "AdaFace"
-        case .facenet512: return "FaceNet 512"
-        }
-    }
+    var displayName: String { strategy.displayName }
 
     /// One-line description used in the picker menu so the user can tell why
     /// they'd pick one over the other without digging into the source.
-    var blurb: String {
-        switch self {
-        case .facenet: return "Inception ResNet · 160×160 · legacy"
-        case .adaface: return "IResNet IR18 · 112×112 · recommended"
-        case .facenet512: return "VGGFace2 · 160×160 · 512-d (Sandberg)"
-        }
-    }
+    var blurb: String { strategy.blurb }
 
     /// SF Symbol used as the picker's leading icon.
-    var sfSymbol: String {
-        switch self {
-        case .facenet: return "person.crop.square"
-        case .adaface: return "person.crop.square.badge.checkmark"
-        case .facenet512: return "person.crop.square.filled.and.at.rectangle"
-        }
-    }
+    var sfSymbol: String { strategy.sfSymbol }
 }
 
 private extension Array where Element: Hashable {
@@ -418,8 +598,9 @@ final class FaceEmbeddingModel {
         // 512-d FaceNet, both trained on MTCNN-aligned faces with random
         // horizontal flips). The legacy Facenet6.mlmodel was trained on
         // loose, unaligned crops with a triplet loss that's already fairly
-        // flip-invariant, so TTA there is a wash.
-        guard kind == .adaface || kind == .facenet512 else {
+        // flip-invariant, so TTA there is a wash. Per-model knob lives on
+        // the strategy so adding a new model means one literal, not a switch.
+        guard kind.strategy.wantsTTA else {
             return try embedding(from: faceCGImage)
         }
 
@@ -803,8 +984,8 @@ class FaceMatcher: ObservableObject {
         // matches the training distribution of AdaFace and the Sandberg
         // 512-d FaceNet (both expect MTCNN-aligned input). Skipped for
         // profile selfies via the yaw gate inside `alignedFaceCrop`.
-        let kindWantsAlignment = model.kind == .adaface || model.kind == .facenet512
-        if kindWantsAlignment,
+        let strategy = model.kind.strategy
+        if strategy.wantsAlignment,
            let alignedCrop = alignedFaceCrop(from: cgImage, observation: largestFace, kind: model.kind) {
             if let embedding = try? model.embeddingWithTTA(from: alignedCrop) {
                 anchors.append(embedding)
@@ -818,7 +999,7 @@ class FaceMatcher: ObservableObject {
         // model benefits from it (alignment-trained kinds).
         let selfieIsProfile = isProfileFace(largestFace)
         if let croppedFace = cropFace(from: cgImage, boundingBox: largestFace.boundingBox, kind: model.kind) {
-            let useTTA = kindWantsAlignment && !selfieIsProfile
+            let useTTA = strategy.wantsTTA && !selfieIsProfile
             let embedding = try (useTTA
                 ? model.embeddingWithTTA(from: croppedFace)
                 : model.embedding(from: croppedFace))
@@ -1074,9 +1255,8 @@ class FaceMatcher: ObservableObject {
                 // falls through. The legacy Facenet6 always takes the loose
                 // crop — it was trained that way.
                 let preparedCrop: CGImage?
-                let kindWantsAlignment = embeddingModel.kind == .adaface
-                    || embeddingModel.kind == .facenet512
-                if kindWantsAlignment {
+                let strategy = embeddingModel.kind.strategy
+                if strategy.wantsAlignment {
                     preparedCrop = alignedFaceCrop(from: cgImage, observation: face, kind: embeddingModel.kind)
                         ?? cropFace(from: cgImage, boundingBox: face.boundingBox, kind: embeddingModel.kind)
                 } else {
@@ -1091,7 +1271,7 @@ class FaceMatcher: ObservableObject {
                 // right-facing one — two different views of the same person —
                 // producing a chimera embedding that matches neither. So we
                 // gate TTA off on profiles.
-                let useTTA = kindWantsAlignment && !isProfileFace(face)
+                let useTTA = strategy.wantsTTA && !isProfileFace(face)
                 let candidateEmbedding = useTTA
                     ? try embeddingModel.embeddingWithTTA(from: croppedFace)
                     : try embeddingModel.embedding(from: croppedFace)
@@ -1120,17 +1300,12 @@ class FaceMatcher: ObservableObject {
                 }
                 // Early-out at "definitely the same person" so we don't keep
                 // scoring more faces in a busy group shot once we've found a
-                // strong match. The threshold is per-architecture because the
-                // three models have very different upper score distributions
-                // — legacy FaceNet hits 0.95+, AdaFace tops out around 0.85,
-                // the Sandberg 512-d model rarely exceeds 0.75.
-                let earlyOut: Float
-                switch embeddingModel.kind {
-                case .adaface: earlyOut = 0.85
-                case .facenet512: earlyOut = 0.70
-                case .facenet: earlyOut = 0.985
-                }
-                if bestSimilarity >= earlyOut { break }
+                // strong match. The threshold is per-architecture (see
+                // `FaceModelStrategy.earlyOut`) because the three models have
+                // very different upper score distributions — legacy FaceNet
+                // hits 0.95+, AdaFace tops out around 0.85, the Sandberg
+                // 512-d model rarely exceeds 0.75.
+                if bestSimilarity >= strategy.earlyOut { break }
             }
 
             if bestSimilarity >= minimumSimilarity {
@@ -1176,8 +1351,7 @@ class FaceMatcher: ObservableObject {
     /// `VNDetectFaceRectanglesRequest` is used as a small optimization.
     private func detectFaces(in cgImage: CGImage) throws -> [VNFaceObservation] {
         let requestHandler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        let wantLandmarks = embeddingModel?.kind == .adaface
-            || embeddingModel?.kind == .facenet512
+        let wantLandmarks = embeddingModel?.kind.strategy.wantsLandmarks ?? false
 
         if wantLandmarks {
             let request = VNDetectFaceLandmarksRequest()
@@ -1249,13 +1423,13 @@ class FaceMatcher: ObservableObject {
     /// bounding-box crop for profiles, which is closer to what the model
     /// actually saw of profile faces during training (rare, but present).
     ///
-    /// We use 2-point alignment (eyes only) rather than the textbook 5-point
-    /// Umeyama similarity transform. The 2-point version handles rotation +
-    /// scale + translation but ignores the nose/mouth points, which costs
-    /// roughly 1-2% recall vs. 5-point. The win is that it's ~30 lines instead
-    /// of ~100, doesn't need a linear algebra dependency, and the dominant
-    /// AdaFace gain over loose crops comes from getting the eyes in the right
-    /// place anyway.
+    /// 2-point alignment (eyes only): a similarity transform from the two eye
+    /// pupils onto the canonical template handles rotation + scale +
+    /// translation. Pupils are Vision's most stable landmarks, so this keeps
+    /// the selfie anchor and scanned crops consistent — which is what the
+    /// calibrated 70% cutoff depends on. (A 5-point fit using nose/mouth was
+    /// trialed and regressed recall: those landmarks are too noisy and added
+    /// alignment jitter that dropped genuine scores below the cutoff.)
     private func alignedFaceCrop(
         from cgImage: CGImage,
         observation: VNFaceObservation,
@@ -1309,6 +1483,12 @@ class FaceMatcher: ObservableObject {
         // location, so the model still gets the canonical geometry it was
         // trained on, just at higher resolution for FaceNet512 (160×160).
         // Y is converted to bottom-left origin to match CIImage.
+        //
+        // NOTE: pupils are Vision's most stable landmarks. A 5-point fit using
+        // nose/mouth was tried and REGRESSED recall — those regions are noisy
+        // enough that they added alignment jitter between the selfie anchor and
+        // scanned photos, dropping genuine cosine scores below the calibrated
+        // 70% cutoff. Eyes-only is intentionally retained.
         let templateScale: CGFloat = CGFloat(outputSize) / 112.0
         let templateLeftEyeTL = CGPoint(x: 38.2946 * templateScale,
                                         y: 51.6963 * templateScale)
@@ -1338,26 +1518,14 @@ class FaceMatcher: ObservableObject {
                                        y: (templateLeftEye.y + templateRightEye.y) / 2)
 
         // Build the affine: translate eye-midpoint to origin → rotate by
-        // -angle → uniform scale → translate to template midpoint. Compose
-        // by post-multiplying so applying to a point runs in declaration
-        // order (translate to origin, then rotate, then scale, then translate
-        // to canonical).
+        // -angle → uniform scale → translate to template midpoint.
         var transform = CGAffineTransform.identity
         transform = transform.translatedBy(x: templateMidpoint.x, y: templateMidpoint.y)
         transform = transform.scaledBy(x: scale, y: scale)
         transform = transform.rotated(by: -angle)
         transform = transform.translatedBy(x: -eyeMidpoint.x, y: -eyeMidpoint.y)
 
-        // `clampedToExtent()` before the transform extends the image's edge
-        // pixels outward to an infinite extent, so a face near the frame edge
-        // produces an aligned crop with edge-replicated borders instead of
-        // black bars. Black borders shift the embedding (the network reads them
-        // as real pixels); edge replication is the standard alignment behavior
-        // and is strictly closer to the MTCNN-aligned crops these models were
-        // trained on. Faces fully inside the frame are unaffected.
-        let ciImage = CIImage(cgImage: cgImage)
-            .clampedToExtent()
-            .transformed(by: transform)
+        let ciImage = CIImage(cgImage: cgImage).transformed(by: transform)
         let cropRect = CGRect(x: 0, y: 0, width: outputSize, height: outputSize)
 
         // Render explicitly to a small RGB context — `createCGImage(from:)`
@@ -1489,15 +1657,11 @@ class FaceMatcher: ObservableObject {
     }
 
     static func cosineBand(for kind: FaceModelKind) -> (floor: Float, ceiling: Float) {
-        switch kind {
-        case .facenet: return (facenetCosineFloor, facenetCosineCeiling)
-        case .adaface: return (adafaceCosineFloor, adafaceCosineCeiling)
-        // Distinct band — see comment on `facenet512CosineFloor`. The
-        // Sandberg checkpoint's embeddings sit lower on the cosine scale
-        // than legacy Facenet6, so reusing FaceNet's 0.45 floor was
-        // cutting valid same-person matches.
-        case .facenet512: return (facenet512CosineFloor, facenet512CosineCeiling)
-        }
+        // Defer to the strategy — distinct band per model. See comment on
+        // `facenet512CosineFloor`: the Sandberg checkpoint's embeddings sit
+        // lower on the cosine scale than legacy Facenet6, so reusing
+        // FaceNet's 0.45 floor was cutting valid same-person matches.
+        kind.strategy.cosineBand
     }
 
     /// Width every band is held at, so one notch of slider travel means the
@@ -1568,38 +1732,51 @@ class FaceMatcher: ObservableObject {
     }
 
     /// Maps a raw cosine similarity onto the user-facing confidence scale.
-    /// Floor maps to 0%, ceiling maps to `displayCeiling` (95%), and very
-    /// strong matches above the ceiling are clamped to that same 95% — we
-    /// never display 100%.
+    /// Routes through the active model's confidence curve (linear, sigmoid,
+    /// or piecewise — see `FaceModelStrategy.confidence(fromCosine:)`), so
+    /// the curve is genuinely model-specific instead of the old global
+    /// linear formula. All curves are anchored to (floor, knee, ceiling) ->
+    /// (0, 0.70, 1) so the slider's 70% notch means the same operating
+    /// point on every model. Capped at `displayCeiling` (95%) because face
+    /// matching is never truly certain — claiming a perfect match would
+    /// overstate what the model actually knows.
     func displayConfidence(from cosine: Float) -> Double {
-        let band = cosineBand
-        let clamped = max(band.floor, min(band.ceiling, cosine))
-        let normalized = Double((clamped - band.floor) / (band.ceiling - band.floor))
-        return min(normalized, Self.displayCeiling)
+        let kind = embeddingModel?.kind ?? .facenet
+        return Self.displayConfidence(from: cosine, kind: kind)
     }
 
     /// Static variant for call sites that don't have a `FaceMatcher` instance
-    /// (e.g. SwiftUI previews). Assumes the FaceNet band for back-compat.
+    /// (e.g. SwiftUI previews). Pass the kind explicitly to get the same
+    /// model-specific curve the instance method would use. The no-kind
+    /// overload assumes the FaceNet band for back-compat.
+    static func displayConfidence(from cosine: Float, kind: FaceModelKind) -> Double {
+        let c = Double(kind.strategy.confidence(fromCosine: cosine))
+        return min(c, displayCeiling)
+    }
+
     static func displayConfidence(from cosine: Float) -> Double {
-        let band = cosineBand(for: .facenet)
-        let clamped = max(band.floor, min(band.ceiling, cosine))
-        let normalized = Double((clamped - band.floor) / (band.ceiling - band.floor))
-        return min(normalized, displayCeiling)
+        displayConfidence(from: cosine, kind: .facenet)
     }
 
     /// Inverse of `displayConfidence` — maps the slider position (0..1 in
     /// confidence units) back to the raw cosine cutoff used for filtering.
+    /// Per-model curves are inverted analytically by the strategy so the
+    /// slider's 70% notch always lands on the calibrated knee, regardless
+    /// of which curve shape the model uses.
     func cosineCutoff(forConfidence strictness: Double) -> Float {
-        let band = cosineBand
-        let clamped = Float(max(0.0, min(1.0, strictness)))
-        return band.floor + clamped * (band.ceiling - band.floor)
+        let kind = embeddingModel?.kind ?? .facenet
+        return Self.cosineCutoff(forConfidence: strictness, kind: kind)
     }
 
-    /// Back-compat static variant — assumes the FaceNet band.
+    /// Back-compat static variant — assumes the FaceNet band when no kind is
+    /// supplied. Prefer the `kind:`-taking overload from call sites that
+    /// know which model is loaded.
+    static func cosineCutoff(forConfidence strictness: Double, kind: FaceModelKind) -> Float {
+        kind.strategy.cosineCutoff(forConfidence: Float(strictness))
+    }
+
     static func cosineCutoff(forConfidence strictness: Double) -> Float {
-        let band = cosineBand(for: .facenet)
-        let clamped = Float(max(0.0, min(1.0, strictness)))
-        return band.floor + clamped * (band.ceiling - band.floor)
+        cosineCutoff(forConfidence: strictness, kind: .facenet)
     }
 
     private func minimumCosineSimilarity(for strictness: Double) -> Float {
