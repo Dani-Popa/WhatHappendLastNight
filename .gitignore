@@ -53,6 +53,10 @@ __pycache__/
 /tools/*.mlmodel
 /tools/*.mlmodelc
 
+# Standalone Python reference pipeline (not part of the app build — the
+# production pipeline lives in WhatHappendLastNight/FaceMatcher.swift).
+/face_recognition_pipeline.py
+
 # Environment and local config
 .env
 .env.*

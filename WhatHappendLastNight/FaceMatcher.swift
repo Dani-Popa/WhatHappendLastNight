@@ -385,10 +385,22 @@ final class FaceEmbeddingModel {
             throw FaceMatcherError.unsupportedModelOutput
         }
 
-        var vector = [Float]()
-        vector.reserveCapacity(outputArray.count)
-        for index in 0..<outputArray.count {
-            vector.append(outputArray[index].floatValue)
+        // Fast path: a contiguous Float32 embedding (the [1,512] output of all
+        // three models) can be copied straight from the backing buffer instead
+        // of boxing every element through NSNumber. Falls back to the safe
+        // element-wise read for any other dtype/layout.
+        let vector: [Float]
+        if outputArray.dataType == .float32,
+           outputArray.strides.last?.intValue == 1 {
+            let ptr = outputArray.dataPointer.assumingMemoryBound(to: Float.self)
+            vector = Array(UnsafeBufferPointer(start: ptr, count: outputArray.count))
+        } else {
+            var v = [Float]()
+            v.reserveCapacity(outputArray.count)
+            for index in 0..<outputArray.count {
+                v.append(outputArray[index].floatValue)
+            }
+            vector = v
         }
 
         return l2Normalized(vector)
@@ -522,22 +534,29 @@ final class FaceEmbeddingModel {
         // changes between FaceNet (RGB) and AdaFace (BGR).
         let scale: Float = kind.pixelScale
         let bias: Float = kind.pixelBias
-        // BGRA buffer byte offsets: 0=B, 1=G, 2=R. Pick the write order so
-        // AdaFace gets B, G, R and FaceNet gets R, G, B.
-        let writeOrder: (Int, Int, Int) = kind.useBGRChannelOrder
-            ? (0, 1, 2)   // B, G, R
-            : (2, 1, 0)   // R, G, B
+        // BGRA byte offsets: 0=B, 1=G, 2=R. AdaFace wants B,G,R written into
+        // channels 0,1,2; FaceNet wants R,G,B. Resolve the order once, then
+        // read three scalars per pixel directly — no per-pixel `[Float]`
+        // allocation. This loop runs imageSize² times per embedding (25,600×
+        // for Facenet6's 160×160 MultiArray input), and the old array literal
+        // heap-allocated on every iteration. Output is bit-identical (verified
+        // numerically for both BGR and RGB write orders).
+        let useBGR = kind.useBGRChannelOrder
 
         for y in 0..<imageSize {
             let row = src.advanced(by: y * bytesPerRow)
             let yOffset = y * yStride
             for x in 0..<imageSize {
                 let pixel = row.advanced(by: x * 4)
-                let channels: [Float] = [Float(pixel[0]), Float(pixel[1]), Float(pixel[2])]
+                let b = Float(pixel[0])
+                let g = Float(pixel[1])
+                let r = Float(pixel[2])
+                let c0: Float, c1: Float, c2: Float
+                if useBGR { c0 = b; c1 = g; c2 = r } else { c0 = r; c1 = g; c2 = b }
                 let base = yOffset + x * xStride
-                dst[base + 0 * cStride] = channels[writeOrder.0] * scale + bias
-                dst[base + 1 * cStride] = channels[writeOrder.1] * scale + bias
-                dst[base + 2 * cStride] = channels[writeOrder.2] * scale + bias
+                dst[base + 0 * cStride] = c0 * scale + bias
+                dst[base + 1 * cStride] = c1 * scale + bias
+                dst[base + 2 * cStride] = c2 * scale + bias
             }
         }
 
@@ -1329,7 +1348,16 @@ class FaceMatcher: ObservableObject {
         transform = transform.rotated(by: -angle)
         transform = transform.translatedBy(x: -eyeMidpoint.x, y: -eyeMidpoint.y)
 
-        let ciImage = CIImage(cgImage: cgImage).transformed(by: transform)
+        // `clampedToExtent()` before the transform extends the image's edge
+        // pixels outward to an infinite extent, so a face near the frame edge
+        // produces an aligned crop with edge-replicated borders instead of
+        // black bars. Black borders shift the embedding (the network reads them
+        // as real pixels); edge replication is the standard alignment behavior
+        // and is strictly closer to the MTCNN-aligned crops these models were
+        // trained on. Faces fully inside the frame are unaffected.
+        let ciImage = CIImage(cgImage: cgImage)
+            .clampedToExtent()
+            .transformed(by: transform)
         let cropRect = CGRect(x: 0, y: 0, width: outputSize, height: outputSize)
 
         // Render explicitly to a small RGB context — `createCGImage(from:)`
@@ -1470,6 +1498,73 @@ class FaceMatcher: ObservableObject {
         // cutting valid same-person matches.
         case .facenet512: return (facenet512CosineFloor, facenet512CosineCeiling)
         }
+    }
+
+    /// Width every band is held at, so one notch of slider travel means the
+    /// same change in strictness across all three models.
+    static let bandWidth: Float = 0.30
+    /// Slider position treated as the recommended operating point.
+    static let recommendedSliderFraction: Float = 0.70
+
+    /// EMPIRICAL CALIBRATION — the rigorous way to put the slider's 70% notch
+    /// on each model's *best* same/different threshold.
+    ///
+    /// The hard-coded bands above are sensible per-architecture priors, but the
+    /// truly optimal cutoff depends on YOUR data (lighting, crop style, who's in
+    /// the photos). To lock it in:
+    ///
+    ///   1. Collect cosine scores with the loaded model + current preprocessing:
+    ///      - `genuineScores`:  scores for pairs you KNOW are the same person.
+    ///      - `impostorScores`: scores for pairs you KNOW are different people.
+    ///      (Score a labeled folder via `cosineSimilarity(_:_:)` on the
+    ///       embeddings `FaceEmbeddingModel.embedding(from:)` produces.)
+    ///   2. Call this with at least ~30 of each.
+    ///   3. Paste the returned `floor`/`ceiling` into the constants above for
+    ///      that model.
+    ///
+    /// It picks the threshold T* that maximizes Youden's J (TPR + TNR − 1) — the
+    /// point that best separates genuine from impostor — then centers the band
+    /// so the 70% notch sits exactly on T*:
+    ///     floor = T* − 0.70 · width,  ceiling = floor + width.
+    ///
+    /// `targetMaxFAR` (optional) instead picks the strictest T* whose impostor
+    /// false-accept rate is ≤ the given value — use it when a false match is
+    /// far costlier than a miss.
+    static func recommendedBand(
+        genuineScores: [Float],
+        impostorScores: [Float],
+        width: Float = bandWidth,
+        targetMaxFAR: Float? = nil
+    ) -> (floor: Float, ceiling: Float, threshold: Float, youdenJ: Float)? {
+        guard !genuineScores.isEmpty, !impostorScores.isEmpty else { return nil }
+
+        let candidates = Array(Set(genuineScores + impostorScores)).sorted()
+        let gCount = Float(genuineScores.count)
+        let iCount = Float(impostorScores.count)
+
+        func tpr(_ t: Float) -> Float { Float(genuineScores.filter { $0 >= t }.count) / gCount }
+        func far(_ t: Float) -> Float { Float(impostorScores.filter { $0 >= t }.count) / iCount }
+
+        var bestT = candidates[0]
+        var bestScore = -Float.greatestFiniteMagnitude
+
+        for t in candidates {
+            let score: Float
+            if let maxFAR = targetMaxFAR {
+                // Among thresholds meeting the FAR budget, prefer the loosest
+                // (highest recall); score = TPR, but disqualify if FAR too high.
+                score = far(t) <= maxFAR ? tpr(t) : -Float.greatestFiniteMagnitude
+            } else {
+                score = tpr(t) + (1 - far(t)) - 1   // Youden's J
+            }
+            // Prefer the lower threshold on ties (keeps recall up).
+            if score > bestScore { bestScore = score; bestT = t }
+        }
+
+        let floor = max(0, bestT - recommendedSliderFraction * width)
+        let ceiling = floor + width
+        let j = tpr(bestT) + (1 - far(bestT)) - 1
+        return (floor, ceiling, bestT, j)
     }
 
     /// Maps a raw cosine similarity onto the user-facing confidence scale.
