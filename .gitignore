@@ -32,11 +32,26 @@ pnpm-debug.log*
 
 # Python local environments and caches
 .venv/
+.venv-*/
 venv/
 env/
 __pycache__/
 *.py[cod]
 *$py.class
+
+# CoreML conversion scratch space
+# The original Sandberg TF checkpoint plus the venv we used to convert it
+# live here at repo root. Not part of the build — the converted model
+# ships from WhatHappendLastNight/FaceNet512_VGGFace2.mlpackage.
+/20180402-114759/
+
+# Generated outputs from tools/ scripts. The canonical model bundled with
+# the app sits at WhatHappendLastNight/FaceNet512_VGGFace2.mlpackage; the
+# duplicate that convert_facenet512.py writes alongside itself is build
+# scratch and shouldn't be tracked.
+/tools/*.mlpackage
+/tools/*.mlmodel
+/tools/*.mlmodelc
 
 # Environment and local config
 .env

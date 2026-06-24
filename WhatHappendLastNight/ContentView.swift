@@ -14,7 +14,7 @@ struct ContentView: View {
     @State private var targetSelfie: NSImage? = nil
     @State private var targetSelfieURL: URL? = nil
     @State private var sourceFolderURL: URL? = nil
-    @State private var threshold: Double = 0.55
+    @State private var threshold: Double = 0.70
     @State private var isSelfieHovered = false
     @State private var isFolderHovered = false
     @State private var isShowingCameraSheet = false
@@ -232,14 +232,15 @@ struct ContentView: View {
 
     /// Default strictness used when the reference photo changes.
     ///
-    /// 55% on the floor/ceiling mapping corresponds to cosine ~0.643 —
-    /// just above the midpoint, tilted slightly toward fewer false
-    /// positives while still catching strong matches. Users dial down
-    /// for tough folders or up to tighten further.
-    private static let defaultThreshold: Double = 0.55
+    /// 70% is the calibrated "clean matches" operating point — each model's
+    /// cosine band is shaped so that slider 0.70 lands on the architecture's
+    /// real same/different decision boundary (~0.36 AdaFace, ~0.66 Facenet6,
+    /// ~0.61 FaceNet512). Below 70% leans toward recall; above 70% toward
+    /// near-certain matches only. See `FaceMatcher.cosineBand(for:)`.
+    private static let defaultThreshold: Double = 0.70
 
     /// Sets a new reference photo and resets per-photo state: the privacy/consent
-    /// acceptance is cleared and the strictness slider returns to its 60% default,
+    /// acceptance is cleared and the strictness slider returns to its 70% default,
     /// so each new photo requires fresh consent.
     private func setSelfie(_ image: NSImage?, url: URL?) {
         targetSelfie = image
@@ -508,8 +509,9 @@ private struct ModelPickerButton: View {
     @State private var isHovered = false
 
     /// All known kinds in the order we want them to appear in the menu.
-    /// AdaFace first because it's the recommended default.
-    private let allKinds: [FaceModelKind] = [.adaface, .facenet]
+    /// AdaFace first because it's the recommended default; the Sandberg
+    /// 512-d FaceNet sits between the two FaceNet variants.
+    private let allKinds: [FaceModelKind] = [.adaface, .facenet512, .facenet]
 
     private var activeKind: FaceModelKind? { matcher.activeKind }
 
