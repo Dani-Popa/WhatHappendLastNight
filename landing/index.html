@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>What Happened Last Night? — Vote for us</title>
+<meta name="description" content="What Happened Last Night? — watch our entry and vote for our team." />
+<style>
+  :root {
+    --bg: #0b0d12;
+    --bg-grad-a: #1a1030;
+    --bg-grad-b: #0b0d12;
+    --fg: #f3f4f6;
+    --muted: #9aa3b2;
+    --accent: #ff3d6e;
+    --accent-2: #7c5cff;
+    --card: rgba(255,255,255,0.04);
+    --ring: rgba(255,255,255,0.08);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased; }
+  body {
+    min-height: 100vh;
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(124,92,255,0.25), transparent 60%),
+      radial-gradient(900px 500px at -10% 110%, rgba(255,61,110,0.22), transparent 60%),
+      linear-gradient(180deg, var(--bg-grad-a), var(--bg-grad-b));
+  }
+  main {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 48px 20px 80px;
+  }
+  .eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+  h1 {
+    font-size: clamp(34px, 6vw, 56px);
+    line-height: 1.05;
+    margin: 0 0 14px;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    background: linear-gradient(90deg, #fff, #d8d2ff 50%, #ffb8c8);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .tagline {
+    color: var(--muted);
+    font-size: 17px;
+    margin: 0 0 28px;
+  }
+  .video-wrap {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    border-radius: 16px;
+    overflow: hidden;
+    background: #000;
+    box-shadow: 0 30px 80px -20px rgba(0,0,0,0.6), 0 0 0 1px var(--ring) inset;
+    margin-bottom: 28px;
+  }
+  .video-wrap iframe,
+  .video-wrap video {
+    position: absolute; inset: 0; width: 100%; height: 100%; border: 0;
+  }
+  .cta-card {
+    background: var(--card);
+    border: 1px solid var(--ring);
+    border-radius: 16px;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .cta-card h2 {
+    margin: 0;
+    font-size: 22px;
+    letter-spacing: -0.01em;
+  }
+  .cta-card p { margin: 0; color: var(--muted); line-height: 1.55; }
+  .team-pill {
+    display: inline-block;
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    color: white;
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 0.02em;
+  }
+  .find-us {
+    display: inline-flex;
+    align-items: center;
+    gap: 14px;
+    padding: 16px 24px;
+    margin-bottom: 28px;
+    border-radius: 16px;
+    background: linear-gradient(90deg, rgba(255,61,110,0.18), rgba(124,92,255,0.18));
+    border: 1px solid rgba(255,255,255,0.12);
+    font-size: 18px;
+    color: var(--fg);
+    box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5);
+  }
+  .find-us .dot {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 6px rgba(255,61,110,0.22);
+    animation: pulse 2.2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 6px rgba(255,61,110,0.22); }
+    50%      { box-shadow: 0 0 0 10px rgba(255,61,110,0.05); }
+  }
+  .find-us .label {
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-size: 13px;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .find-us strong {
+    letter-spacing: 0.08em;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: clamp(22px, 4vw, 30px);
+    font-weight: 800;
+    color: #fff;
+  }
+  .vote-banner {
+    margin-top: 6px;
+    padding: 18px 20px;
+    border-radius: 14px;
+    background: linear-gradient(90deg, rgba(255,61,110,0.18), rgba(124,92,255,0.18));
+    border: 1px solid rgba(255,255,255,0.08);
+    font-size: 18px;
+    font-weight: 600;
+    text-align: center;
+  }
+  .vote-banner .big { font-size: 26px; display: block; margin-top: 4px; }
+  .app-section { margin: 36px 0 28px; }
+  .app-eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+  .app-title { font-size: 22px; margin: 0 0 14px; letter-spacing: -0.01em; }
+  .app-shot {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 14px;
+    border: 1px solid var(--ring);
+    box-shadow: 0 24px 60px -20px rgba(0,0,0,0.55);
+  }
+  footer { margin-top: 36px; color: var(--muted); font-size: 13px; text-align: center; }
+  @media (max-width: 520px) {
+    main { padding: 28px 16px 60px; }
+    .cta-card { padding: 20px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">Our entry</div>
+  <h1>What Happened Last Night?</h1>
+  <p class="tagline">Press play — then don't forget to vote for us.</p>
+  <div class="find-us">
+    <span class="dot"></span>
+    <span class="label">Find us at</span>
+    <strong>CLU.T6.PETA</strong>
+  </div>
+
+  <div class="video-wrap">
+    <!--
+      Default: plays Final.mp4 sitting next to this file. Works as-is when
+      the whole landing/ folder is deployed (Netlify Drop, GitHub Pages, etc.).
+
+      To use YouTube instead, replace the <video> line below with:
+        <iframe src="https://www.youtube.com/embed/VIDEO_ID" title="What Happened Last Night?"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowfullscreen></iframe>
+    -->
+    <video src="Final.mp4" controls playsinline preload="metadata" poster=""></video>
+  </div>
+
+  <section class="app-section">
+    <div class="app-eyebrow">A peek inside the app</div>
+    <h2 class="app-title">Here's what we built.</h2>
+    <img class="app-shot" src="appPhoto.jpg" alt="Screenshot of the What Happened Last Night app" loading="lazy" />
+  </section>
+
+  <div class="cta-card">
+    <span class="team-pill">Our team</span>
+    <h2>Liked it? Vote for us.</h2>
+    <p>Remember our name when you cast your vote — every one counts. Thanks for watching!</p>
+    <div class="vote-banner">
+      Vote for
+      <span class="big">“What Happened Last Night?”</span>
+    </div>
+  </div>
+
+  <footer>Scan, watch, vote. 🎬</footer>
+</main>
+</body>
+</html>
