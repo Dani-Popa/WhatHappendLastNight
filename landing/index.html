@@ -161,6 +161,177 @@
     box-shadow: 0 24px 60px -20px rgba(0,0,0,0.55);
   }
   footer { margin-top: 36px; color: var(--muted); font-size: 13px; text-align: center; }
+
+  /* ── Floor map ─────────────────────────────────────────────── */
+  .map-section { margin: 32px 0 28px; }
+  .map-header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+  .map-header h2 {
+    font-size: 22px;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+  .map-eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .map-room-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: rgba(255, 61, 110, 0.14);
+    border: 1px solid rgba(255, 61, 110, 0.35);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: #ffd6e2;
+    white-space: nowrap;
+  }
+  .map-room-chip::before {
+    content: "";
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 4px rgba(255, 61, 110, 0.18);
+  }
+  .map-frame {
+    position: relative;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01)),
+      rgba(11,13,18,0.6);
+    border: 1px solid var(--ring);
+    border-radius: 18px;
+    padding: 12px;
+    box-shadow:
+      0 30px 80px -25px rgba(0,0,0,0.6),
+      0 0 0 1px rgba(255,255,255,0.04) inset;
+    overflow: hidden;
+  }
+  .map-frame::before {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    pointer-events: none;
+    background:
+      radial-gradient(420px 220px at 18% 52%, rgba(255,61,110,0.18), transparent 65%),
+      radial-gradient(360px 200px at 90% 12%, rgba(124,92,255,0.16), transparent 65%);
+    border-radius: inherit;
+  }
+  .map-wrap {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 2400 / 1696;
+    border-radius: 12px;
+    overflow: hidden;
+    isolation: isolate;
+  }
+  .map-img {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .map-pin {
+    position: absolute;
+    left: 18.32%;
+    top: 52.1%;
+    transform: translate(-50%, -50%);
+    z-index: 2;
+    pointer-events: none;
+  }
+  .pin-core {
+    position: relative;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow:
+      0 0 0 4px rgba(255, 61, 110, 0.32),
+      0 0 22px 4px rgba(255, 61, 110, 0.55);
+  }
+  .pin-core::after {
+    content: "";
+    position: absolute;
+    inset: -6px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 61, 110, 0.6);
+    animation: pin-ping 2.4s cubic-bezier(0.2, 0.8, 0.2, 1) infinite;
+  }
+  @keyframes pin-ping {
+    0%   { transform: scale(0.6); opacity: 0.9; }
+    80%  { transform: scale(2.2); opacity: 0; }
+    100% { transform: scale(2.2); opacity: 0; }
+  }
+  .pin-flag {
+    position: absolute;
+    left: 22px;
+    top: -2px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px 6px 12px;
+    border-radius: 10px;
+    background: linear-gradient(90deg, rgba(255, 61, 110, 0.95), rgba(124, 92, 255, 0.95));
+    color: white;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    white-space: nowrap;
+    box-shadow:
+      0 10px 24px -10px rgba(255, 61, 110, 0.6),
+      0 0 0 1px rgba(255,255,255,0.18) inset;
+  }
+  .map-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 18px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 4px 4px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .map-meta .left, .map-meta .right {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .map-legend-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 3px rgba(255, 61, 110, 0.2);
+  }
+  .map-download {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: #d8d2ff;
+    text-decoration: none;
+    font-weight: 600;
+    border-bottom: 1px dashed rgba(216, 210, 255, 0.4);
+    padding-bottom: 1px;
+  }
+  .map-download:hover { color: #fff; border-bottom-color: #fff; }
+  @media (prefers-reduced-motion: reduce) {
+    .pin-core::after { animation: none; }
+    .find-us .dot { animation: none; }
+  }
+  @media (max-width: 520px) {
+    .map-frame { padding: 8px; border-radius: 14px; }
+    .pin-flag { font-size: 11px; padding: 5px 9px; }
+    .map-header { flex-direction: column; align-items: flex-start; gap: 8px; }
+  }
+
   @media (max-width: 520px) {
     main { padding: 28px 16px 60px; }
     .cta-card { padding: 20px; }
@@ -206,6 +377,49 @@
       <span class="big">“What Happened Last Night?”</span>
     </div>
   </div>
+
+  <section class="map-section" aria-labelledby="map-title">
+    <div class="map-header">
+      <div>
+        <div class="map-eyebrow">Floor 6 · Tower</div>
+        <h2 id="map-title">Here's where to find us.</h2>
+      </div>
+      <span class="map-room-chip" aria-hidden="true">T6.PETA</span>
+    </div>
+    <div class="map-frame">
+      <div class="map-wrap">
+        <img
+          class="map-img"
+          src="floorplan_dark.png"
+          alt="Floor 6 plan of the Garmin Cluj tower with our team room T6.PETA highlighted in pink"
+          width="2400" height="1696"
+          loading="lazy"
+          decoding="async"
+        />
+        <div class="map-pin" role="img" aria-label="Our room: T6.PETA">
+          <div class="pin-core"></div>
+          <div class="pin-flag">
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+              <path d="M2 5.5l2 2 4-5" stroke="white" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            T6.PETA
+          </div>
+        </div>
+      </div>
+      <div class="map-meta">
+        <span class="left">
+          <span class="map-legend-dot" aria-hidden="true"></span>
+          Our team room — look for the messy whiteboard
+        </span>
+        <a class="map-download" href="floorplan_dark.png" download="WhatHappenedLastNight_T6.PETA.png" aria-label="Download the floor map">
+          <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Download map
+        </a>
+      </div>
+    </div>
+  </section>
 
   <footer>Scan, watch, vote. 🎬</footer>
 </main>
